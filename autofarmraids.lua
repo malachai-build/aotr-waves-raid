@@ -1,10 +1,18 @@
 -- Game name: Attack on Titans Revolution
 -- Game Id: 4658598196
 -- Game UniverseId: 4658598196
--- Game PlaceIds: 13379208636 (Lobby), 13379349730 (Mission) 4658598196 ( x )
+-- Social places: 13379208636 (Main menu), 14916516914 (Lobby), 14932214603 (Trade hub)
 -- Game link: https://www.roblox.com/games/13379208636/Attack-on-Titan-Revolution
 
 -- Script version: 1.0.7
+
+-- Manual/local execution must stand down before loading the UI or mission services.
+-- Main menu, lobby, trade hub: "unloaded" works with the unchanged watcher.
+if game.PlaceId == 13379208636 or game.PlaceId == 14916516914 or game.PlaceId == 14932214603 then
+  if not isfolder("aotr") then makefolder("aotr") end
+  writefile("aotr/heartbeat.txt", "unloaded " .. os.date("%H:%M:%S"))
+  return
+end
 
 
 
@@ -130,6 +138,7 @@ local UserConfigs = {
   HoverOffsetZ = 0,
   NapeOffsetY = 2,        -- studs; pulled napes sit this far above the player
   SafeHeight = 9999,      -- Y of the reload spot
+  ColossalDangerRadius = 180, -- interrupt cannon work for titans this close to Eren
   HumanSkills = true,     -- use ready human hotbar skills with a short gap between successes
   AwakeningSlot = 1,     -- Rage Mode / other awakening hotbar slot
   NoKillMinutes = 5,      -- minutes without a kill before feeding a titan to reset the run
@@ -142,7 +151,7 @@ local SAVED_KEYS = {
   "Autofarm", "AutoRetry", "AutoReload", "AutoSkipCutscenes", "AutoRaidChest", "OpenKeyChest", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
-  "HumanSkills", "AwakeningSlot",
+  "HumanSkills", "AwakeningSlot", "ColossalDangerRadius",
   "NoKillMinutes", "BossNoKillMinutes", "AutoQTE",
 }
 
@@ -197,7 +206,7 @@ if UserConfigs.DebugMode then
   local Path = "KittyScripts/Aotr/logs/"
   local FileName = Path .. "log_" .. DateString .. "_" .. TimeString .. ".txt"
 
-  local Header = { 
+  local Header = {
     string.rep("-", 50),
     "Debug file for the script",
     "Date: " .. os.date("%A, %B %d, %Y"),
@@ -210,7 +219,7 @@ if UserConfigs.DebugMode then
   writefile(FileName, table.concat(Header, "\n"))
 
   warn("Debug mode is on. Logging to: " .. FileName)
-    
+
   CurrentLogFile = FileName
 end
 
@@ -279,7 +288,7 @@ local function DebugPrint(mode: "warn" | "debug", maxAmount: number?, stackOffse
     FinalMessage
   )
 
-  
+
   Handler(RealFinalMessage)
 
   if CurrentLogFile then
@@ -296,7 +305,6 @@ if identifyexecutor and identifyexecutor() ~= "Matcha" then Boot("exit: executor
 -- Auto-exec can fire before the DataModel has its ids; wait so the game check below is real.
 repeat task.wait(0.25) until game.GameId ~= 0 and game.PlaceId ~= 0
 if game.GameId ~= 4658598196 then Boot("exit: wrong game " .. tostring(game.GameId)); DebugPrint("debug", nil, nil, nil, "Wrong game detected..?"); return end
-if game.PlaceId == 14916516914 then Boot("exit: lobby"); Heartbeat("lobby"); DebugPrint("debug", nil, nil, nil, "You seem to be in the lobby. Please execute this in a game."); return end
 if game.PlaceId == 14638336319 then Boot("exit: normal mission"); Heartbeat("unloaded"); return end
 Boot("game ok")
 
@@ -565,7 +573,7 @@ local DownMiddlePartUi: Instance? = GetPath(PlayerGui, true, "Interface", "HUD",
 
 --== Offsets ==--
 local Offsets: { [string]: { [string]: number } } = OffsetsFake.Offsets
-                                                     
+
 local PrimaryPartOffset = Offsets.Model.PrimaryPart;
 local BaseToPrimitiveOffset = Offsets.BasePart.Primitive;
 local PrimitivePositionOffset = Offsets.Primitive.Position;
@@ -593,7 +601,7 @@ local function GetHumanoid(instance: Instance): Humanoid? return instance:FindFi
 -- Drop the cached parts whenever player.Character is a different model.
 local function SyncCharacterCache(player: Player, cache)
   local Current = player.Character
-  if Current and (not cache.Character or cache.Character.Address ~= Current.Address) then
+  if not Current or not cache.Character or cache.Character.Address ~= Current.Address then
     cache.Character, cache.Hrp, cache.Humanoid = Current, nil, nil
   end
 end
@@ -632,6 +640,17 @@ local function GetPlayerHumanoid(player: Player): Humanoid?
 
   PlayerCharacterCache.Humanoid = Humanoid
   return Humanoid
+end
+
+
+-- Read the current character, never a retained body from the previous spawn.
+local function IsLocalAlive(): boolean
+  local Character = GetPlayerCharacter(LocalPlayer)
+  if not Character then return false end
+  local Humanoid = GetPlayerHumanoid(LocalPlayer)
+  local Hrp = GetPlayerHrp(LocalPlayer)
+  if not Humanoid or not Humanoid.Parent or not Hrp or not Hrp.Parent then return false end
+  return Humanoid.Health > 0
 end
 
 
@@ -719,6 +738,23 @@ local function RegisterTitanFail(titan: Instance)
   end
 end
 
+
+-- Shared colossal objective helpers; the active strategy below uses sword attacks.
+Stats.Colossal = { LastShot = -math.huge, RetryAt = 0, Opened = false }
+function Stats.Colossal.Path(root, _, ...)
+  for _, name in ipairs({...}) do
+    root = root and root:FindFirstChild(name)
+    if not root then return nil end
+  end
+  return root
+end
+function Stats.Colossal.IsTitan(titan)
+  return titan and (titan.Name == "Colossal_Titan" or titan:GetAttribute("Type") == "Colossal")
+end
+function Stats.Colossal.Objectives()
+  local folder = Stats.Colossal.Path(Workspace, false, "Unclimbable", "Objective")
+  return folder and folder:FindFirstChild("Defend_Eren_2"), folder and folder:FindFirstChild("Colossal_Boss")
+end
 
 -- Raid bosses (the Female Titan raid, 2026-11-02) carry a Shifter attribute and have far more HP
 -- than the client shows (Humanoid.Health reads 100), so they never time out.
@@ -836,7 +872,7 @@ local function GetPullTargets(target: Instance): { Instance }
   local Candidates = {}
   local TargetAddress = target.Address -- Matcha wrappers do not compare equal; compare addresses
   for address, other in pairs(KnownTitans) do
-    if address ~= TargetAddress and IsTitanAlive(other) and not IsTitanIgnored(other) then
+    if address ~= TargetAddress and not Stats.Colossal.IsTitan(other) and IsTitanAlive(other) and not IsTitanIgnored(other) then
       local OtherHrp = GetTitanHrp(other)
       if OtherHrp then
         local Distance = (OtherHrp.Position - TargetPos).Magnitude
@@ -942,6 +978,7 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
     end
   end
   local function Place(titan: Instance)
+    if Stats.Colossal.IsTitan(titan) then return end
     Tr.step("main", "pull: find weak spot")
     local WeakSpot = GetTitanWeakSpot(titan); if not WeakSpot then return end
     PlacePart(titan, WeakSpot)
@@ -973,23 +1010,30 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
 end
 
 local function GetDefenseEren(): (Instance?, BasePart?)
+  local ColossalEren, ColossalBoss = Stats.Colossal.Objectives()
+  if ColossalEren and ColossalBoss then
+    local health = ColossalEren:FindFirstChild("Health")
+    local bossHealth = ColossalBoss:FindFirstChild("Health")
+    if not health or health.Value <= 0 or not bossHealth or bossHealth.Value <= 0 then return nil, nil end
+    local reference = ColossalEren:FindFirstChild("Reference")
+    local eren = reference and reference.Value
+    return eren, ColossalEren:FindFirstChild("Collider") or (eren and eren:FindFirstChild("HumanoidRootPart"))
+  end
   if game.PlaceId ~= 14012874501 then return nil, nil end
   local Objectives = game:GetService("ReplicatedStorage"):FindFirstChild("Objectives")
   local Defend = Objectives and Objectives:FindFirstChild("Defend_Eren")
   if not Defend or Defend.Value >= 1 then return nil, nil end
-  local Unclimbable = Workspace:FindFirstChild("Unclimbable")
-  local Objective = Unclimbable and Unclimbable:FindFirstChild("Objective")
-  local ErenObjective = Objective and Objective:FindFirstChild("Defend_Eren")
+  local ErenObjective = GetPath(Workspace, false, "Unclimbable", "Objective", "Defend_Eren")
   local Reference = ErenObjective and ErenObjective:FindFirstChild("Reference")
   local Eren = Reference and Reference.Value
-  local ErenHrp = Eren and Eren:FindFirstChild("HumanoidRootPart")
-  return Eren, ErenHrp
+  return Eren, Eren and Eren:FindFirstChild("HumanoidRootPart")
 end
+
 
 local function GetNearestTitan(): Instance?
   local DefenseEren, DefenseHrp = GetDefenseEren()
   local DefenseAddress = DefenseEren and DefenseEren.Address
-  if os.clock() - LastNearestUpdate < (DefenseHrp and 0.5 or 1) and CachedNearestTitan and CachedNearestTitan.Address ~= DefenseAddress and CachedNearestTitan.Parent and IsTitanAlive(CachedNearestTitan) and not IsTitanIgnored(CachedNearestTitan) then return CachedNearestTitan end
+  if os.clock() - LastNearestUpdate < (DefenseHrp and 0.2 or 1) and CachedNearestTitan and CachedNearestTitan.Address ~= DefenseAddress and not Stats.Colossal.IsTitan(CachedNearestTitan) and CachedNearestTitan.Parent and IsTitanAlive(CachedNearestTitan) and not IsTitanIgnored(CachedNearestTitan) then return CachedNearestTitan end
 
   local NearestTitan: Instance? = nil
   local NearestDistance = math.huge
@@ -1000,7 +1044,7 @@ local function GetNearestTitan(): Instance?
 
   for _, titan in pairs(KnownTitans) do
     if not titan or not titan.Parent then continue end
-    if titan.Address == DefenseAddress then continue end
+    if titan.Address == DefenseAddress or Stats.Colossal.IsTitan(titan) then continue end
     -- if not titan:IsA("Model") then continue end
     if IsTitanIgnored(titan) then continue end
     if not IsTitanAlive(titan) then continue end
@@ -1509,8 +1553,9 @@ end
 Stats.HumanSkills = { LastSuccess = -math.huge, LastCheck = -math.huge, LastTap = -math.huge,
   NextSlot = 1, Pending = nil, PendingSince = 0, RetryAfter = {}, LastBar = nil,
   AwakeningActive = false, Slots = {}, Labels = {}, LabelSince = {} }
-function Stats.UseHumanSkill(): boolean
-  if not UserConfigs.HumanSkills then return false end
+function Stats.UseHumanSkill(burst: boolean?): boolean
+  if not UserConfigs.HumanSkills or not IsLocalAlive() then return false end
+  if burst then return Stats.Colossal.UseReadySkills() end
   local state = Stats.HumanSkills
   local now = os.clock()
   if now - state.LastCheck < 0.15 then return false end
@@ -1556,7 +1601,7 @@ function Stats.UseHumanSkill(): boolean
       Boot(string.format("human skill slot %d confirmed", slot))
       return true
     end
-    if now - state.PendingSince > 8 or not vk then
+    if now - state.PendingSince > (burst and 0.3 or 8) or not vk then
       state.RetryAfter[slot] = now + 5
       state.NextSlot = slot % 5 + 1
       state.Pending = nil
@@ -1569,10 +1614,10 @@ function Stats.UseHumanSkill(): boolean
     end
     return false
   end
-  if now - state.LastSuccess < 2.5 then return false end
+  if now - state.LastSuccess < (burst and 0.15 or 2.5) then return false end
   for offset = 0, 4 do
     local slot = (state.NextSlot + offset - 1) % 5 + 1
-    local canAwaken = slot ~= awakening or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)
+    local canAwaken = slot ~= awakening or (burst and (not bar or not max)) or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)
     if canAwaken and now >= (state.RetryAfter[slot] or 0) then
       local seconds, vk, text, stable = slotUi(slot)
       if seconds and (seconds <= 1 or stable) and vk then
@@ -1588,6 +1633,7 @@ function Stats.UseHumanSkill(): boolean
   end
   return false
 end
+
 
 --#endregion -- Human skills --
 
@@ -1666,6 +1712,529 @@ end
 
 --#endregion -- Quick time events --
 
+-- Colossal raid controller. All cannon work runs in the main coroutine, so sword clicks,
+-- hover and cannon input cannot race. Aim uses the visible barrel rather than memory writes.
+function Stats.Colossal.Active()
+  local eren, boss = Stats.Colossal.Objectives()
+  local hp = boss and boss:FindFirstChild("Health")
+  local ehp = eren and eren:FindFirstChild("Health")
+  return hp ~= nil and hp.Value > 0 and ehp ~= nil and ehp.Value > 0
+    and TitansFolder:FindFirstChild("Colossal_Titan") ~= nil
+end
+-- Each ready raid skill has its own short input debounce. No global success gap or
+-- pending-skill timeout can block the other four slots from being used.
+function Stats.Colossal.UseReadySkills()
+  if not UserConfigs.HumanSkills or not UserConfigs.Autofarm or Stopped() or not IsLocalAlive() or not isrbxactive()
+    or Qte.Active or Stats.CutsceneSkip.Visible then return false end
+  local state, now = Stats.Colossal, os.clock()
+  if now - (state.SkillScanAt or -math.huge) < 0.08 then return false end
+  state.SkillScanAt = now
+  state.SkillTaps = state.SkillTaps or {}
+  local bar, max = tonumber(LocalPlayer:GetAttribute("Bar")), tonumber(LocalPlayer:GetAttribute("Max_Bar"))
+  local human = Stats.HumanSkills
+  if bar and max and max > 0 then
+    if human.LastBar and bar < human.LastBar - 0.1 and bar > 0 then human.AwakeningActive = true end
+    if bar <= 0.1 then human.AwakeningActive = false end
+    human.LastBar = bar
+  end
+  local awakening = math.clamp(math.floor(UserConfigs.AwakeningSlot), 1, 5)
+  local used = false
+  for slot = 1, 5 do
+    if Stopped() or not IsLocalAlive() or not isrbxactive() or Qte.Active or Stats.CutsceneSkip.Visible then break end
+    if now < (state.SkillTaps[slot] or 0) then continue end
+    if slot == awakening and bar and max and max > 0
+      and (bar < max - 0.5 or human.AwakeningActive) then continue end
+    local skill = Stats.Colossal.Path(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
+    local cooldown = skill and skill:FindFirstChild("Cooldown")
+    local label = cooldown and cooldown:FindFirstChild("Label")
+    local key = skill and Stats.Colossal.Path(skill, false, "Key", "Key")
+    local seconds = label and tonumber(string.match(label.Text or "", "[%d%.]+"))
+    local vk = KeyToVk(key and key.Text)
+    if vk and (not cooldown or not IsObjectVisible(cooldown) or (seconds and seconds <= 0)) then
+      state.SkillTaps[slot] = now + 0.2
+      keypress(vk)
+      task.wait(0.02)
+      keyrelease(vk)
+      used = true
+    end
+  end
+  return used
+end
+
+-- Cannon / Eren defense scheduler.
+function Stats.Colossal.Danger()
+  local _, origin = GetDefenseEren()
+  if not origin then return false end
+  local target = GetNearestTitan()
+  local root = target and GetTitanHrp(target)
+  if not root then return false end
+  local offset = root.Position - origin.Position
+  -- Ground distance: a titan's root height should not hide an attacker beside Eren.
+  return math.sqrt(offset.X * offset.X + offset.Z * offset.Z) < UserConfigs.ColossalDangerRadius
+end
+function Stats.Colossal.Emergency()
+  local state = Stats.Colossal
+  local eren = state.Objectives()
+  local health = eren and eren:FindFirstChild("Health")
+  if not health then return true end
+  local now, hp = os.clock(), health.Value
+  if not state.HealthAt or now - state.HealthAt >= 0.2 then
+    if state.Health and hp < state.Health and state.HealthAt then
+      state.DamageRate = (state.Health - hp) / math.max(now - state.HealthAt, 0.2)
+      state.LastDamage = now
+    end
+    state.Health, state.HealthAt = hp, now
+  end
+  if hp <= 0 then return true end
+  if not state.Danger() then return false end
+  local rate = state.LastDamage and now - state.LastDamage < 2 and (state.DamageRate or 0) or 0
+  return hp <= 15 or (rate > 0 and hp / rate < 4)
+end
+function Stats.Colossal.ReadyAt()
+  local state = Stats.Colossal
+  local now = os.clock()
+  local ready = state.LastShot + (state.Cooldown or 2.7)
+  local cannon = state.Cannon
+  if cannon and cannon.Parent then
+    local remaining = tonumber(cannon:GetAttribute("Cooldown"))
+    -- Some states omit Cooldown; retain the confirmed shot's CD in that case.
+    if remaining and remaining > 0 and remaining <= (state.Cooldown or 2.7) + 0.5 then
+      ready = math.max(ready, now + remaining)
+    end
+  end
+  return ready
+end
+function Stats.Colossal.ShouldCannon()
+  local state = Stats.Colossal
+  local now = os.clock()
+  if not state.Active() or now < state.RetryAt then return false end
+  -- Start the short approach just before reload finishes, so firing can follow CD expiry.
+  if now + (state.PreparationLead or 1.4) < state.ReadyAt() then state.DueSince = nil; return false end
+  state.DueSince = state.DueSince or now
+  if not state.Danger() then return true end
+  if state.Emergency() then return false end
+  -- Give the immediate attacker one kill / one second of sword work. A permanent stream
+  -- of nearby titans must not starve the cannon while the colossal walks to the wall.
+  return state.DefenseCredit == true or now - state.DueSince >= 1
+end
+function Stats.Colossal.FindCannon()
+  local walls = Stats.Colossal.Path(Workspace, false, "Climbable", "Walls")
+  if not walls then return nil end
+  for _, wall in ipairs(walls:GetChildren()) do
+    local cannons = wall:FindFirstChild("Cannons")
+    if cannons then
+      for _, cannon in ipairs(cannons:GetChildren()) do
+        if cannon.ClassName == "Model" and cannon:GetAttribute("Spawn") == LocalPlayer.Name then return cannon end
+      end
+    end
+  end
+end
+function Stats.Colossal.OpenSkills()
+  if Stats.Colossal.Opened then return end
+  Stats.Colossal.Opened = true
+  Stats.Colossal.UseReadySkills()
+end
+function Stats.Colossal.ReleaseKeys()
+  mouse1release()
+  for _, vk in ipairs({0x57, 0x53, 0x41, 0x44, 0x45}) do keyrelease(vk) end
+end
+-- Persistent shot/HP telemetry for live aim calibration; all positions are read-only.
+function Stats.Colossal.LogCalibration(kind, data)
+  data.kind, data.clock, data.time = kind, os.clock(), os.date("%H:%M:%S")
+  data.job = game.JobId
+  local state=Stats.Colossal
+  state.LogEntries=(state.LogEntries or 0)+1
+  pcall(function()
+    if state.LogEntries==1 or state.LogEntries%500==0 then
+      local path="aotr/cannon_calibration.txt"
+      if isfile(path) then
+        local old=readfile(path)
+        if #old>2000000 then
+          local cut=string.find(old,"\n",#old-1000000,true)
+          if cut then writefile(path,string.sub(old,cut+1)) end
+        end
+      end
+    end
+    appendfile("aotr/cannon_calibration.txt",HttpService:JSONEncode(data).."\n")
+  end)
+end
+function Stats.Colossal.TrackHealth()
+  local state = Stats.Colossal
+  if state.HealthObserver then return end
+  state.HealthObserver = true
+  task.spawn(function()
+    local last, lastAddress
+    while not Stopped() do
+      local _, boss = state.Objectives()
+      local hp = boss and boss:FindFirstChild("Health")
+      if hp and hp.Value > 1 then
+        local value = hp.Value
+        if hp.Address ~= lastAddress then
+          last, lastAddress = value, hp.Address
+          state.LogCalibration("health_start", {hp=value})
+        elseif last and value ~= last then
+          local drop=last-value
+          state.LogCalibration("hp", {hp=value, delta=drop, skill=tostring(LocalPlayer:GetAttribute("Skill"))})
+          if drop>100000 then
+            state.RecentDamage=state.RecentDamage or {}
+            table.insert(state.RecentDamage,{clock=os.clock(),damage=drop})
+            if #state.RecentDamage>20 then table.remove(state.RecentDamage,1) end
+          end
+          last = value
+        end
+      end
+      state.FlushResults()
+      task.wait(0.04)
+    end
+  end)
+end
+function Stats.Colossal.RecordImpact(id, endedAt)
+  local state=Stats.Colossal
+  state.PendingImpacts=state.PendingImpacts or {}
+  state.PendingImpacts[id]=endedAt
+  local shot=state.CalibrationShots and state.CalibrationShots[id]
+  if shot then shot.impactAt=endedAt end
+end
+function Stats.Colossal.FlushResults()
+  local state=Stats.Colossal
+  for id,endedAt in pairs(state.PendingImpacts or {}) do
+    if os.clock()-endedAt>=0.3 then
+      local shot=state.CalibrationShots and state.CalibrationShots[id]
+      if shot and (shot.accepted or shot.projectile) then
+        local matched
+        for _,event in ipairs(state.RecentDamage or {}) do
+          if not event.used and math.abs(event.clock-endedAt)<0.4
+            and (not matched or math.abs(event.clock-endedAt)<math.abs(matched.clock-endedAt)) then matched=event end
+        end
+        if matched then matched.used=true end
+        state.LogCalibration("result",{id=id,hit=matched~=nil,damage=matched and matched.damage or 0,
+          range=shot.range,pitch=shot.pitch,part=shot.part,heldMounted=shot.ownerAtImpact==LocalPlayer.Name,interrupted=shot.interrupted or false})
+        Boot("cannon calibration "..(matched and ("HIT damage="..math.floor(matched.damage)) or "MISS").." range="..math.floor(shot.range))
+      end
+      if state.CalibrationShots then state.CalibrationShots[id]=nil end
+      state.PendingImpacts[id]=nil
+    end
+  end
+end
+function Stats.Colossal.RecordShot(cannon)
+  local state = Stats.Colossal
+  state.ShotSequence = (state.ShotSequence or 0) + 1
+  local id = tostring(game.JobId) .. ":" .. RunId .. ":" .. tostring(state.ShotSequence)
+  local barrel = state.Path(cannon, false, "Barrel", "EndBarrel3")
+  local boss = TitansFolder:FindFirstChild("Colossal_Titan")
+  local root = boss and boss:FindFirstChild("HumanoidRootPart")
+  local _, objective = state.Objectives()
+  local hp = objective and objective:FindFirstChild("Health")
+  if barrel and root then
+    local p, q, f = barrel.Position, root.Position, barrel.CFrame.LookVector * -1
+    local delta = q-p
+    state.CalibrationShots=state.CalibrationShots or {}
+    state.CalibrationShots[id]={firedAt=os.clock(),range=math.sqrt(delta.X*delta.X+delta.Z*delta.Z),
+      pitch=math.deg(math.asin(math.clamp(f.Y,-1,1))),part=state.AimSolution and state.AimSolution.part}
+    state.LogCalibration("shot", {id=id,hp=hp and hp.Value,range=math.sqrt(delta.X*delta.X+delta.Z*delta.Z),
+      pitch=math.deg(math.asin(math.clamp(f.Y,-1,1))),yaw=math.deg(math.atan2(f.Z,f.X)),
+      aimPart=state.AimSolution and state.AimSolution.part,margin=state.AimSolution and state.AimSolution.margin,
+      muzzle={p.X,p.Y,p.Z},target={q.X,q.Y,q.Z},direction={f.X,f.Y,f.Z}})
+  end
+  -- Locate the actual projectile without scanning the whole DataModel.
+  local debris = Workspace:FindFirstChild("Debris")
+  local roots, seen = {Workspace}, {}
+  if debris then roots[#roots+1]=debris end
+  for _, folder in ipairs(roots) do for _, child in ipairs(folder:GetChildren()) do seen[child.Address]=true end end
+  task.spawn(function()
+    local untilAt = os.clock()+2
+    while not Stopped() and os.clock()<untilAt do
+      for _, folder in ipairs(roots) do
+        for _, child in ipairs(folder:GetChildren()) do
+          if not seen[child.Address] then
+            seen[child.Address]=true
+            if child.Name=="Cannon" and child.ClassName=="Model" then
+              local modelAddress=child.Address
+              local shot=state.CalibrationShots and state.CalibrationShots[id]
+              if shot then
+                shot.projectile=true
+                local measuredDelay=math.clamp(os.clock()-shot.firedAt+0.08,0.7,1.3)
+                state.LaunchDelay=(state.LaunchDelay or 0.95)*0.5+measuredDelay*0.5
+                if not shot.accepted then
+                  state.LastShot=shot.firedAt
+                  state.Cooldown=tonumber(cannon:GetAttribute("CD")) or 2.7
+                  state.DefenseCredit,state.DueSince=false,nil
+                end
+              end
+              task.spawn(function()
+                local limit=os.clock()+6
+                while not Stopped() and os.clock()<limit do
+                  local live
+                  for _,candidate in ipairs(folder:GetChildren()) do
+                    if candidate.Address==modelAddress then live=candidate;break end
+                  end
+                  if not live then
+                    local owner=tostring(cannon:GetAttribute("Player"))
+                    local shot=state.CalibrationShots and state.CalibrationShots[id]
+                    if shot then shot.ownerAtImpact=owner end
+                    state.LogCalibration("projectile_end",{id=id,owner=owner})
+                    state.RecordImpact(id,os.clock())
+                    break
+                  end
+                  local part=live:FindFirstChild("Hitbox") or live:FindFirstChild("Cannon")
+                  if not part then break end
+                  local p,v=part.Position,part.Velocity
+                  local target=TitansFolder:FindFirstChild("Colossal_Titan")
+                  local root=target and target:FindFirstChild("HumanoidRootPart")
+                  local nape=target and state.Path(target,false,"Hitboxes","Hit","Nape")
+                  local q=root and root.Position
+                  local n=nape and nape.Position
+                  state.LogCalibration("flight",{id=id,position={p.X,p.Y,p.Z},velocity={v.X,v.Y,v.Z},
+                    target=q and {q.X,q.Y,q.Z},nape=n and {n.X,n.Y,n.Z}})
+                  task.wait(0.05)
+                end
+              end)
+            end
+          end
+        end
+      end
+      task.wait(0.03)
+    end
+  end)
+  return id
+end
+
+-- Fitted from the cannonball's live position/velocity trace, not the old linear pitch guess.
+function Stats.Colossal.Evaluate(origin, boxes, yaw, pitch, motion, onlyPart)
+  local speed, gravity = 500, 210
+  local vx=speed*math.cos(pitch)*math.cos(yaw)
+  local vz=speed*math.cos(pitch)*math.sin(yaw)
+  local vy=speed*math.sin(pitch)
+  motion=motion or {x=0,y=0,z=0}
+  local delay=Stats.Colossal.LaunchDelay or 0.95
+  local best
+  for _,box in ipairs(boxes) do
+    if not onlyPart or onlyPart==box.name then
+      local relative=vx-motion.x
+      if relative>1 then
+        for _,fraction in ipairs({-0.3,0,0.3}) do
+          local t=(box.x+motion.x*delay-origin.X+box.hx*fraction)/relative
+          if t>0.02 and t<4 then
+            local py=origin.Y+vy*t-gravity*t*t/2
+            local pz=origin.Z+vz*t
+            local yError=math.abs(py-box.y-motion.y*(t+delay))
+            local zError=math.abs(pz-box.z-motion.z*(t+delay))
+            local margin=math.min(box.hy-yError,box.hz-zError)
+            local priority=box.name=="Head" and 3 or ((box.name=="Collision" or box.name=="Collision_2" or box.name=="UpperTorso") and 2 or 1)
+            local score=margin>=12 and (priority*1000+margin) or margin
+            if not best or score>best.score then best={pitch=pitch,yaw=yaw,margin=margin,score=score,part=box.name,flight=t} end
+          end
+        end
+      end
+    end
+  end
+  return best
+end
+function Stats.Colossal.Plan(origin, boxes, yaw, motion)
+  local best
+  for halfDegree=0,100 do
+    local candidate=Stats.Colossal.Evaluate(origin,boxes,yaw,math.rad(halfDegree*0.5),motion)
+    if candidate and (not best or candidate.score>best.score) then best=candidate end
+  end
+  return best
+end
+function Stats.Colossal.SolveAim(cannon)
+  local state=Stats.Colossal
+  local barrel=state.Path(cannon,false,"Barrel","EndBarrel3")
+  local boss=TitansFolder:FindFirstChild("Colossal_Titan")
+  local root=boss and boss:FindFirstChild("HumanoidRootPart")
+  local fake=boss and boss:FindFirstChild("Fake")
+  if not barrel or not root or not fake then return nil end
+  local forward=barrel.CFrame.LookVector*-1
+  local origin=barrel.Position+forward*3.5+Vector3.new(0,1,0)
+  local q=root.Position
+  local yaw=math.atan2(q.Z-origin.Z,q.X-origin.X)
+  local boxes={}
+  for _,name in ipairs({"Collision","Collision_2","UpperTorso","LowerTorso","Head","LeftUpperLeg","RightUpperLeg","LeftLowerLeg","RightLowerLeg","LeftFoot","RightFoot"}) do
+    local part=fake:FindFirstChild(name)
+    if part then
+      local cf,size=part.CFrame,part.Size
+      local p,r,u,l=part.Position,cf.RightVector,cf.UpVector,cf.LookVector
+      boxes[#boxes+1]={name=name,x=p.X,y=p.Y,z=p.Z,
+        hx=(math.abs(r.X)*size.X+math.abs(u.X)*size.Y+math.abs(l.X)*size.Z)/2,
+        hy=(math.abs(r.Y)*size.X+math.abs(u.Y)*size.Y+math.abs(l.Y)*size.Z)/2,
+        hz=(math.abs(r.Z)*size.X+math.abs(u.Z)*size.Y+math.abs(l.Z)*size.Z)/2}
+    end
+  end
+  state.AimGeometry={origin=origin,boxes=boxes}
+  return state.Plan(origin,boxes,yaw,nil)
+end
+function Stats.Colossal.Aim(cannon, deadline)
+  local state = Stats.Colossal
+  local barrel = state.Path(cannon, false, "Barrel", "EndBarrel3")
+  if not barrel then return false end
+  local solutionAt=-math.huge
+  while os.clock() < deadline do
+    if Stopped() or not IsLocalAlive() or not UserConfigs.Autofarm or not isrbxactive() or not state.Active()
+      or state.Emergency() or Qte.Active or Stats.CutsceneSkip.Visible or cannon:GetAttribute("Player") ~= LocalPlayer.Name then return false end
+    if os.clock()-solutionAt>0.15 then
+      state.AimSolution=state.SolveAim(cannon)
+      solutionAt=os.clock()
+    end
+    local solution=state.AimSolution
+    -- Do not expend a ready shot on an arc that cannot intersect the titan.
+    if not solution or solution.margin<8 then return false end
+    local forward = barrel.CFrame.LookVector * -1
+    local yaw = math.atan2(forward.Z, forward.X)
+    local elevation = math.asin(math.clamp(forward.Y, -1, 1))
+    local yawError = math.atan2(math.sin(solution.yaw-yaw),math.cos(solution.yaw-yaw))
+    local pitchError = solution.pitch-elevation
+    local geometry=state.AimGeometry
+    local actual=geometry and state.Evaluate(geometry.origin,geometry.boxes,yaw,elevation,nil,solution.part)
+    if actual and actual.margin>=math.max(12,math.min(25,solution.margin*0.65)) then
+      state.AimSolution=actual
+      return true
+    end
+    local pitchAxis=math.abs(pitchError)>=math.abs(yawError)
+    local errorAngle=pitchAxis and pitchError or yawError
+    local sign=pitchAxis and (state.PitchSign or 1) or (state.YawSign or 1)
+    local positive=errorAngle*sign>0
+    local vk=pitchAxis and (positive and 0x57 or 0x53) or (positive and 0x44 or 0x41)
+    local rate=pitchAxis and (state.PitchRate or math.rad(15)) or (state.YawRate or math.rad(15))
+    local duration=math.clamp(math.abs(errorAngle)/rate*0.8,0.01,0.15)
+    keypress(vk);task.wait(duration);keyrelease(vk);task.wait(0.02)
+    local after=barrel.CFrame.LookVector*-1
+    local change=pitchAxis and (math.asin(math.clamp(after.Y,-1,1))-elevation)
+      or math.atan2(math.sin(math.atan2(after.Z,after.X)-yaw),math.cos(math.atan2(after.Z,after.X)-yaw))
+    if math.abs(change)>0.0001 then
+      local measuredSign=change*(positive and 1 or -1)>0 and 1 or -1
+      if pitchAxis then state.PitchSign=measuredSign else state.YawSign=measuredSign end
+      local observed=math.clamp(math.abs(change)/duration,math.rad(5),math.rad(40))
+      if pitchAxis then state.PitchRate=observed else state.YawRate=observed end
+    end
+    Progress()
+  end
+  local solution=state.AimSolution
+  state.LogCalibration("aim_timeout",{margin=solution and solution.margin,part=solution and solution.part,
+    pitch=solution and math.deg(solution.pitch)})
+  return false
+end
+function Stats.Colossal.Handle()
+  local state = Stats.Colossal
+  state.TrackHealth()
+  if not IsLocalAlive() then state.ReleaseKeys(); return false end
+  if state.ExitPending then
+    state.ReleaseKeys()
+    if not isrbxactive() then FarmStats.Status = "waiting to exit cannon"; return true end
+    if state.ExitPending.Parent and state.ExitPending:GetAttribute("Player") == LocalPlayer.Name then
+      TapKey(0x45)
+      task.wait(0.08)
+      if state.ExitPending:GetAttribute("Player") == LocalPlayer.Name then return true end
+    end
+    state.ExitPending = nil
+    WhatShouldIBeDoing = "attack"
+  end
+  if not state.Active() or not UserConfigs.Autofarm then return false end
+  if not isrbxactive() or Stats.CutsceneSkip.Visible or Qte.Active then return false end
+  state.OpenSkills()
+  if not state.ShouldCannon() then return false end
+  local cannon = state.FindCannon()
+  state.Cannon = cannon
+  local hitbox = cannon and cannon:FindFirstChild("Hitbox")
+  local hrp = GetPlayerHrp(LocalPlayer)
+  if not hitbox or not hrp then state.RetryAt = os.clock() + 1; return false end
+  local owner = cannon:GetAttribute("Player")
+  if owner and owner ~= "" and owner ~= LocalPlayer.Name then state.RetryAt = os.clock() + 1; return false end
+  CurrentTitanTarget = nil
+  WhatShouldIBeDoing = "cannon"
+  FarmStats.Status = "aiming colossal cannon"
+  local preparedAt = os.clock()
+  local ok, err = pcall(function()
+    local p = hitbox.Position
+    -- Sword/skill animations briefly block cannon entry. Let them settle, checking Eren.
+    for _ = 1, 4 do
+      if state.Emergency() or not isrbxactive() or Stopped() then return end
+      task.wait(0.1)
+    end
+    for _ = 1, 3 do
+      if cannon:GetAttribute("Player") == LocalPlayer.Name then break end
+      if state.Emergency() or not isrbxactive() or Stopped() then return end
+      -- Approach after the animation wait; otherwise gravity drops us out of E range.
+      hrp.CFrame = CFrame.new(p.X, p.Y + 2, p.Z)
+      hrp.AssemblyLinearVelocity = Vector3Zero
+      task.wait(0.06)
+      TapKey(0x45)
+      task.wait(0.18)
+    end
+    if cannon:GetAttribute("Player") ~= LocalPlayer.Name then state.ClaimFailed = true; Boot("colossal cannon claim unconfirmed"); return end
+    -- Ownership arrives before the local WASD handlers; the live probe needed this settle.
+    for _ = 1, 5 do
+      if state.Emergency() or not isrbxactive() or Stopped() then return end
+      task.wait(0.08)
+    end
+    -- Never let aiming consume Eren's survival window. Danger checks run between pulses.
+    if state.Aim(cannon, os.clock() + 3.4) and not state.Emergency() and isrbxactive() then
+      local waitUntil = math.min(os.clock() + 0.7, state.ReadyAt())
+      while os.clock() < waitUntil do
+        if Stopped() or not IsLocalAlive() or not isrbxactive() or state.Emergency() then return end
+        task.wait(0.03)
+      end
+      local firing = cannon:GetAttribute("Firing")
+      local cooldown = cannon:GetAttribute("Cooldown")
+      if not firing and (not tonumber(cooldown) or tonumber(cooldown) <= 0) then
+        local shotId = state.RecordShot(cannon)
+        mouse1press()
+        task.wait(0.06)
+        mouse1release()
+        task.wait(0.15)
+        local confirmed = cannon:GetAttribute("Firing") or cannon:GetAttribute("Cooldown") ~= cooldown
+        if state.CalibrationShots and state.CalibrationShots[shotId] then state.CalibrationShots[shotId].accepted=confirmed and true or false end
+        state.LogCalibration("shot_acceptance", {id=shotId,accepted=confirmed and true or false})
+        state.Cooldown = tonumber(cannon:GetAttribute("CD")) or 2.7
+        if confirmed then
+          state.LastShot = os.clock()
+          state.PreparationLead = math.clamp(state.LastShot - preparedAt, 0.6, 2.4)
+          state.DefenseCredit, state.DueSince = false, nil
+        end
+        Boot("colossal cannon shot " .. (confirmed and "accepted" or "unconfirmed"))
+        -- Preserve ownership until the projectile's impact has been acknowledged.
+        -- Dismounting immediately may invalidate the server's pending shot registration.
+        local impactWaitStart=os.clock()
+        local impactDeadline=impactWaitStart+5
+        FarmStats.Status="waiting for cannon impact"
+        while os.clock()<impactDeadline do
+          local pending=state.CalibrationShots and state.CalibrationShots[shotId]
+          if not pending then break end
+          if not confirmed and not pending.projectile and os.clock()-impactWaitStart>1.6 then
+            state.LogCalibration("not_fired",{id=shotId})
+            state.CalibrationShots[shotId]=nil
+            break
+          end
+          if pending.impactAt and os.clock()-pending.impactAt>=0.35 then break end
+          if Stopped() or not IsLocalAlive() or not UserConfigs.Autofarm or not isrbxactive() or state.Emergency() then
+            if pending then pending.interrupted=true end
+            state.LogCalibration("impact_wait_interrupted",{id=shotId})
+            break
+          end
+          Progress()
+          task.wait(0.04)
+        end
+      end
+    end
+  end)
+  state.ReleaseKeys()
+  if cannon.Parent and cannon:GetAttribute("Player") == LocalPlayer.Name then
+    if isrbxactive() then TapKey(0x45); task.wait(0.06) end
+    if cannon:GetAttribute("Player") == LocalPlayer.Name then state.ExitPending = cannon end
+  end
+  if not ok then Boot("colossal cannon error: " .. tostring(err)) end
+  -- Exit/interrupt always hands control straight back to Eren defense.
+  state.RetryAt = os.clock() + (state.ClaimFailed and 2 or 0.6)
+  state.ClaimFailed = false
+  WhatShouldIBeDoing = state.ExitPending and "cannon" or "attack"
+  FarmStats.Status = "defending Eren"
+  Progress()
+  return true
+end
+
+
+
+
 
 
 -- // Some functions that couldn't fit before \\ --
@@ -1724,17 +2293,6 @@ end
 
 local function LogDeath(where: string)
   DumpHistory("death (" .. where .. ")")
-end
-
-
-local function IsLocalAlive(): boolean
-  -- Native Health reads can hang on a stale character even inside pcall. The Retry UI and
-  -- character replacement handle death; presence here is enough to gate combat and station work.
-  local Character = LocalPlayer.Character
-  if not Character or not Character.Parent then return false end
-  local Humanoid = GetPlayerHumanoid(LocalPlayer)
-  local Hrp = GetPlayerHrp(LocalPlayer)
-  return Humanoid ~= nil and Humanoid.Parent ~= nil and Hrp ~= nil and Hrp.Parent ~= nil
 end
 
 
@@ -2721,8 +3279,9 @@ function CrateRoute.MarketManager.Handle(): boolean
 end
 
 local function KillTitan(titan: Instance)
+  if not IsLocalAlive() then CurrentTitanTarget = nil; return end
   DebugPrint("debug", 3, nil, "KillTitan", "Starting kill sequence for:", titan.Name)
-  if not titan or not titan.Parent then DebugPrint("debug", 3, nil, "KillTitan", "Invalid titan"); return end
+  if not titan or not titan.Parent or Stats.Colossal.IsTitan(titan) then DebugPrint("debug", 3, nil, "KillTitan", "Invalid sword target"); return end
 
   local StartTime = os.clock()
   local TitanAddress = titan.Address
@@ -2742,7 +3301,9 @@ local function KillTitan(titan: Instance)
     task.wait(math.max(0, UserConfigs.AttackDelay + math.random(-20, 20) / 1000))
     Tr.step("main", "kill checks")
     if Stopped() or not UserConfigs.Autofarm then break end
+    if not IsLocalAlive() then CurrentTitanTarget = nil; print("[Aotr] died while attacking " .. titan.Name:sub(1, 8)); LogDeath("attacking " .. titan.Name:sub(1, 8)); FarmStats.Status = "dead, waiting to respawn"; break end
     if CrateRoute.Pending() then break end
+    if Stats.Colossal.ShouldCannon() then break end
     if IsBoss and os.clock() - LastChestCheck > 0.5 then
       LastChestCheck = os.clock()
       local chests = Interface:FindFirstChild("Chests")
@@ -2750,20 +3311,20 @@ local function KillTitan(titan: Instance)
     end
     if not IsTitanAlive(titan) then
       FarmStats.Kills += 1
+      if not IsBoss then Stats.Colossal.DefenseCredit = true end
       print(string.format("[Aotr] %s down after %.1fs", titan.Name:sub(1, 8), os.clock() - StartTime))
       break
     end
     -- During Defend Eren, abandon a distant target when another titan gets closer to him.
     -- After the objective completes, Eren becomes the raid boss and normal targeting resumes.
     local DefenseEren, DefenseHrp = GetDefenseEren()
-    if DefenseEren and DefenseHrp then
+    if DefenseHrp then
       local PriorityTitan = GetNearestTitan()
-      if titan.Address == DefenseEren.Address or (PriorityTitan and PriorityTitan.Address ~= titan.Address) then
+      if (DefenseEren and titan.Address == DefenseEren.Address) or (PriorityTitan and PriorityTitan.Address ~= titan.Address) then
         Boot("switching to titan closest to Eren")
         break
       end
     end
-    if not IsLocalAlive() then print("[Aotr] died while attacking " .. titan.Name:sub(1, 8)); LogDeath("attacking " .. titan.Name:sub(1, 8)); FarmStats.Status = "dead, waiting to respawn"; break end
     if UserConfigs.AutoReload and AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
     -- No per-titan kill timeout (removed at the user's request, 2026-11-03): the farm stays on a
     -- target until it dies. KillTimeout is no longer read. A titan that never
@@ -2807,11 +3368,12 @@ local function KillTitan(titan: Instance)
       Tr.step("main", "pull napes (write)")
       PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
 
-      Stats.UseHumanSkill()
+      Stats.UseHumanSkill(Stats.Colossal.Active())
 
       Tr.step("main", "slash wait")
       task.wait()
       Tr.step("main", "click")
+      if not IsLocalAlive() then CurrentTitanTarget = nil; break end
       mouse1click()
       if os.clock() >= FarmStats.NextMouseSweepAt then
         local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
@@ -2826,7 +3388,7 @@ local function KillTitan(titan: Instance)
           local steps = math.random(8, 12)
           Tr.step("main", "mouse sweep")
           for step = 1, steps do
-            if Stopped() or WhatShouldIBeDoing ~= "attack" or Qte.Active or Stats.CutsceneSkip.Visible or not isrbxactive() then break end
+            if Stopped() or not IsLocalAlive() or WhatShouldIBeDoing ~= "attack" or Qte.Active or Stats.CutsceneSkip.Visible or not isrbxactive() then break end
             local t = step / steps
             local u = 1 - t
             mousemoveabs(math.floor(u * u * startX + 2 * u * t * bendX + t * t * targetX),
@@ -2842,6 +3404,7 @@ local function KillTitan(titan: Instance)
       end
       task.wait(0.03)
       Tr.step("main", "space")
+      if not IsLocalAlive() then CurrentTitanTarget = nil; break end
       keypress(0x20)
       task.wait(0.03)
       keyrelease(0x20)
@@ -2874,6 +3437,7 @@ task.spawn(function() -- KnownTitans updater and TitansCache cleanup
       InFolder[address] = true
       if not KnownTitans[address] and not DeadTitans[address] then
         KnownTitans[address] = titan
+        if Stats.Colossal.Active() then RegisterTitan(titan) end
       end
     end
 
@@ -2895,7 +3459,7 @@ task.spawn(function() -- KnownTitans updater and TitansCache cleanup
     end
 
     Tr.step("titans", "wait")
-    task.wait(1)
+    task.wait(Stats.Colossal.Active() and 0.2 or 1)
   end
 end)
 
@@ -2974,37 +3538,56 @@ task.spawn(function() -- The main loop, where the magic happens
       continue
     end
 
-    if CrateRoute.Handle() then
-      task.wait(0.1)
+    if Stats.Colossal.Active() and UserConfigs.Autofarm and isrbxactive()
+      and not Qte.Active and not Stats.CutsceneSkip.Visible then
+      Stats.Colossal.UseReadySkills()
+    end
+    if Stats.Colossal.Handle() then
+      task.wait(0.03)
       continue
     end
-    if UserConfigs.AutoPerks and UserConfigs.AutoMarket and CrateRoute.MarketPending then
-      if PerkManager.SurveyPending then
-        if PerkManager.Handle() then task.wait(0.1); continue end
-      else
-        if CrateRoute.MarketManager.Handle() then task.wait(0.1); continue end
+    -- Eren can die in ~15 seconds. Defer Waves/perk menus during this raid.
+    if not Stats.Colossal.Active() then
+      if CrateRoute.Handle() then
+        task.wait(0.1)
+        continue
       end
-      FarmStats.Status = "waiting for market check"
-      task.wait(0.5)
-      continue
+      if UserConfigs.AutoPerks and UserConfigs.AutoMarket and CrateRoute.MarketPending then
+        if PerkManager.SurveyPending then
+          if PerkManager.Handle() then task.wait(0.1); continue end
+        else
+          if CrateRoute.MarketManager.Handle() then task.wait(0.1); continue end
+        end
+        FarmStats.Status = "waiting for market check"
+        task.wait(0.5)
+        continue
+      end
+      if PerkManager.Handle() then
+        task.wait(0.1)
+        continue
+      end
+      CrateRoute.ResumeSavedWave()
+      if CrateRoute.HandleUpgrade() then
+        task.wait(0.1)
+        continue
+      end
+      if CrateRoute.HandleEquipment() then
+        task.wait(0.1)
+        continue
+      end
+      if not UserConfigs.Autofarm then
+        CurrentTitanTarget = nil
+        FarmStats.Status = "Waves tasks idle (titan farm off)"
+        task.wait(0.5)
+        continue
+      end
+
     end
-    if PerkManager.Handle() then
-      task.wait(0.1)
-      continue
-    end
-    CrateRoute.ResumeSavedWave()
-    if CrateRoute.HandleUpgrade() then
-      task.wait(0.1)
-      continue
-    end
-    if CrateRoute.HandleEquipment() then
-      task.wait(0.1)
-      continue
-    end
+
     if not UserConfigs.Autofarm then
       CurrentTitanTarget = nil
-      FarmStats.Status = "Waves tasks idle (titan farm off)"
-      task.wait(0.5)
+      FarmStats.Status = "titan farm off"
+      task.wait(0.2)
       continue
     end
 
@@ -3037,7 +3620,7 @@ end)
 task.spawn(function() -- Players cache
   while not Stopped() do
     local PlayerCount = #Players:GetPlayers()
-    
+
     for _, player in ipairs(Players:GetPlayers()) do
       RegisterPlayer(player)
       task.wait()
@@ -3054,7 +3637,7 @@ task.spawn(function() -- Players cache
       end
       task.wait()
     end
-    
+
     task.wait(10)
   end
 end)
@@ -3089,6 +3672,7 @@ local HOVER_INTERVAL = 0.05 -- seconds between hover CFrame writes (20 a second)
 local RenderConn
 
 local function HoverStep()
+  if not IsLocalAlive() then CurrentTitanTarget = nil; return end
   if not UserConfigs.Autofarm or WhatShouldIBeDoing ~= "attack" then return end
   if CurrentRobloxState == "Inactive" then
     -- This used to write the CFrame every frame (~60 heavy writes a second) with velocity left to
@@ -3309,9 +3893,13 @@ local function buildMenu()
     Tooltip = "Stack a raid boss's hitbox limbs for each slash; extra damage is unverified",
     Callback = setter("PullBossLimbs") }))
 
+  reg("ColossalDangerRadius", boss:AddSlider("ColossalDangerRadius", { Text = "Colossal: Eren Defense Radius", Default = UserConfigs.ColossalDangerRadius,
+    Min = 100, Max = 600, Rounding = 0, Suffix = " studs", Tooltip = "Radius for ground defense priority; an imminent Eren death interrupts cannon work",
+    Callback = setter("ColossalDangerRadius") }))
+
   local skills = main:AddLeftGroupbox("Human Skills")
   reg("HumanSkills", skills:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
-    Tooltip = "Use ready hotbar skills; wait 2.5 seconds after each confirmed use", Callback = setter("HumanSkills") }))
+    Tooltip = "Colossal: use each ready skill immediately; other modes wait 2.5 seconds between confirmed uses", Callback = setter("HumanSkills") }))
   reg("AwakeningSlot", skills:AddSlider("AwakeningSlot", { Text = "Awakening Slot", Default = UserConfigs.AwakeningSlot,
     Min = 1, Max = 5, Rounding = 0, Tooltip = "Hotbar slot for Rage Mode; press only at full bar, then wait until the bar empties and fills again",
     Callback = setter("AwakeningSlot") }))

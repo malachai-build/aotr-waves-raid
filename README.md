@@ -19,3 +19,15 @@ This source includes Waves crate delivery, Market and upgrade stations, perk man
 The normal mission source is maintained separately in [aotr-farm](https://github.com/malachai-build/aotr-farm). The older combined repository history was preserved before the split.
 
 Based on Kitty's AoTR script v1.0.7 (@roguekitty).
+
+## Colossal raid (local development)
+
+The cannon/Eren-defense controller is active again; the colossal sword experiment has been removed. Sword attacks and nape pulls target normal titans, prioritizing attackers near Eren. The controller tracks cannon cooldown, prepares early for the next shot, and yields to imminent Eren danger. Aim uses the measured 500-stud/sec shell speed and 210-stud/sec-squared downward acceleration, selecting an intersecting arc through the titan body. It stays mounted through impact when Eren is safe. Full raid completion remains unverified.
+
+Raid skills 1-5 retain their immediate readiness checks and independent input debounces. Visible cooldowns and awakening charge are respected, without a global confirmation delay. Perk menus remain deferred during this raid.
+
+Compile in Matcha, then run `tests/colossal_controller_test.lua` with the source staged at `aotr/autofarm_branch.lua`. Local autoexec reads `C:\matcha\workspace\aotr\autofarm_branch.lua`. The original remote loader is backed up at `C:\matcha\workspace\aotr\waves_raid_loader_before_colossal.lua`; the remote autoexec pin has not changed.
+
+Cannon calibration telemetry is written as JSON lines in `C:\matcha\workspace\aotr\cannon_calibration.txt` (Matcha disallows `.jsonl`). Shot records, actual projectile trajectories, impact times, and boss HP changes are recorded separately. `tools/analyze_cannon_calibration.py <log>` reports HP-confirmed hits, misses, rejected fire inputs, and unresolved shots; background 82,500-point ticks do not count as cannon hits.
+
+Final aim validation: 8/8 HP-confirmed shells in the retained validation cohort, including a complete final pass with 5/5 damaging shots. See [`calibration/cannon_validation.csv`](calibration/cannon_validation.csv) and [`calibration/README.md`](calibration/README.md) for distances, damage, and measurement rules.
