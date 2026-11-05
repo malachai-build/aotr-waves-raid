@@ -3,6 +3,7 @@ local source = readfile("aotr/autofarm_branch.lua")
 local a = assert(string.find(source, "local function GetCharacter(", 1, true))
 local b = assert(string.find(source, "local function GetTitanHrp(", a, true))
 local header = [====[
+local Recovery = {Blocked=false}
 local LocalPlayer = {Address=1}
 local CharacterCache = {[1]={}}
 local function IsValid(object) return object and object.Parent end
