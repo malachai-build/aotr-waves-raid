@@ -14,9 +14,11 @@ The entrypoint skips the normal mission and lobby, creates the Matcha `aotr` wor
 
 Keep only one active AoTR autoexec entrypoint for Waves and Raids. In particular, replace an existing full `autofarmraids.lua` autoexec copy with this line instead of adding it alongside that copy.
 
-This source includes Waves crate delivery, Market and upgrade stations, perk management, raid chests, QTE handling, and raid boss targeting. It is the same code currently staged at `C:\matcha\workspace\aotr\autofarm_branch.lua` and `C:\matcha\autoexec\autofarmraids.lua` (verified by SHA-256 on 2026-11-05).
+This source includes Waves crate delivery, Market and upgrade stations, perk management, raid chests, QTE handling, and raid boss targeting. The farm creates its `aotr` folder through Matcha's file API before writing logs or heartbeat files, including direct mission startup.
 
 The normal mission source is maintained separately in [aotr-farm](https://github.com/malachai-build/aotr-farm). The older combined repository history was preserved before the split.
+
+For automatic recovery, use the [two-file watchdog setup](https://github.com/malachai-build/aotr-farm#watchdog-setup). Open Matcha, save this loadstring in autoexec, run it once in the current session if needed, then start the watchdog. The farm writes `aotr/heartbeat.txt` relative to Matcha's actual workspace; users do not create folders or configure paths. The watchdog does not install scripts into autoexec.
 
 Based on Kitty's AoTR script v1.0.7 (@roguekitty).
 
