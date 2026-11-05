@@ -10,7 +10,7 @@ if game.PlaceId == 14638336319 then return end
 if game.GameId ~= 0 and game.GameId ~= 4658598196 then return end
 if not isfolder("aotr") then makefolder("aotr") end
 
-local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-waves-raid/6eed69f18a860ea055ea08877c0a636beb80a225/autofarmraids.lua")
+local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-waves-raid/78a3a15de776444434cf30366330b85c8dff8c86/autofarmraids.lua")
 if type(source) ~= "string" or #source < 150000 then
   warn("[AoTR Waves/Raid] source download failed")
   return
