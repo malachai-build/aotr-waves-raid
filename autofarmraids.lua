@@ -17,6 +17,7 @@ end
 
 
 local Stats = {}
+local UI = { lib = nil, window = nil, controls = {}, unloading = false, ready = false }
 
 local ScriptStart = os.clock()
 
@@ -110,6 +111,7 @@ end)
 -- Everything the menu can change. Saved to SETTINGS_FILE.
 local UserConfigs = {
   Autofarm = true,
+  RandomMouseMovements = false, -- optional combat mouse sweeps; never run with settings open
   AutoRetry = true,       -- press Retry on the rewards screen
   AutoReload = true,      -- reload blades / refill gas when they run out
   AutoSkipCutscenes = true, -- press E when the cutscene Skip prompt appears
@@ -148,7 +150,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "AutoSkipCutscenes", "AutoRaidChest", "OpenKeyChest", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "RandomMouseMovements", "AutoRetry", "AutoReload", "AutoSkipCutscenes", "AutoRaidChest", "OpenKeyChest", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "HumanSkills", "AwakeningSlot", "ColossalDangerRadius",
@@ -2872,7 +2874,6 @@ end
 
 -- Perk names and rarities from the AoTR Perks wiki, read 2026-11-04. The GUI cards
 -- carry the perk name but not a useful rarity label, so keep this catalog local.
-local UI
 PerkManager = { Pending = true, SurveyPending = true, Owned = nil, NextCheck = 0 }
 PerkManager.Tiers = {
   [1] = "ENHANCED METABOLISM|ENDURING|FORTITUDE|CRIPPLE|HOLLOW|LUCKY|MIGHTY|FIRST AID|GEAR BEGINNER",
@@ -3337,6 +3338,7 @@ local function KillTitan(titan: Instance)
       StartTime = os.clock() -- an unfocused stretch should not count toward the timeout
       task.wait(0.5)
     else
+      if UI.IsOpen() then FarmStats.Status = "settings open"; task.wait(0.1); continue end
       if WhatShouldIBeDoing ~= "attack" then task.wait(0.1); continue end
       FarmStats.Status = "attacking"
       CurrentTitanTarget = titan
@@ -3374,8 +3376,9 @@ local function KillTitan(titan: Instance)
       task.wait()
       Tr.step("main", "click")
       if not IsLocalAlive() then CurrentTitanTarget = nil; break end
+      if UI.IsOpen() then continue end
       mouse1click()
-      if os.clock() >= FarmStats.NextMouseSweepAt then
+      if UserConfigs.RandomMouseMovements and not UI.IsOpen() and os.clock() >= FarmStats.NextMouseSweepAt then
         local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
         if viewport then
           local mouse = LocalPlayer:GetMouse()
@@ -3388,7 +3391,7 @@ local function KillTitan(titan: Instance)
           local steps = math.random(8, 12)
           Tr.step("main", "mouse sweep")
           for step = 1, steps do
-            if Stopped() or not IsLocalAlive() or WhatShouldIBeDoing ~= "attack" or Qte.Active or Stats.CutsceneSkip.Visible or not isrbxactive() then break end
+            if not UserConfigs.RandomMouseMovements or UI.IsOpen() or Stopped() or not IsLocalAlive() or WhatShouldIBeDoing ~= "attack" or Qte.Active or Stats.CutsceneSkip.Visible or not isrbxactive() then break end
             local t = step / steps
             local u = 1 - t
             mousemoveabs(math.floor(u * u * startX + 2 * u * t * bendX + t * t * targetX),
@@ -3396,7 +3399,7 @@ local function KillTitan(titan: Instance)
             task.wait(math.random(15, 30) / 1000)
           end
           FarmStats.MouseSweepSide = 1 - side
-          if WhatShouldIBeDoing == "attack" and not Qte.Active and not Stats.CutsceneSkip.Visible and isrbxactive() then
+          if UserConfigs.RandomMouseMovements and not UI.IsOpen() and not Stopped() and IsLocalAlive() and WhatShouldIBeDoing == "attack" and not Qte.Active and not Stats.CutsceneSkip.Visible and isrbxactive() then
             mousemoverel(math.random(-3, 3), math.random(-3, 3))
           end
         end
@@ -3405,6 +3408,7 @@ local function KillTitan(titan: Instance)
       task.wait(0.03)
       Tr.step("main", "space")
       if not IsLocalAlive() then CurrentTitanTarget = nil; break end
+      if UI.IsOpen() then continue end
       keypress(0x20)
       task.wait(0.03)
       keyrelease(0x20)
@@ -3748,8 +3752,44 @@ RenderConn = game:GetService("RunService").RenderStepped:Connect(OnRenderStepped
 -- bob, reload spot). UE's own Settings tab has the menu key and configs. Our settings are
 -- saved to aotr_farm.json on every change and loaded at start.
 local UE_URL = "https://raw.githubusercontent.com/hauntedscripts/Scripts2/refs/heads/main/matcha%20ue"
-UI = { lib = nil, window = nil, controls = {}, unloading = false, ready = false }
 local KEYS = { farm = 0x75, unload = 0x23 } -- F6, End
+
+-- Roblox can hide its native cursor in combat; draw a pointer above the settings UI.
+function UI.IsOpen()
+  return not UI.unloading and UI.window and UI.window.Visible == true
+    and UI.lib and UI.lib.Toggled ~= false and not UI.lib._unloaded
+end
+function UI.RemoveCursor()
+  if UI.cursorFill then UI.cursorFill:Remove(); UI.cursorFill = nil end
+  if UI.cursorEdge then UI.cursorEdge:Remove(); UI.cursorEdge = nil end
+end
+function UI.UpdateCursor()
+  if Stopped() or UI.unloading then UI.RemoveCursor(); return end
+  local visible = UI.IsOpen() and isrbxactive() == true
+  if not visible then
+    if UI.cursorFill then UI.cursorFill.Visible = false; UI.cursorEdge.Visible = false end
+    return
+  end
+  if not UI.cursorFill then
+    UI.cursorFill = Drawing.new("Triangle")
+    UI.cursorFill.Filled = true
+    UI.cursorFill.Color = Color3.fromRGB(255, 255, 255)
+    UI.cursorFill.ZIndex = 10000
+    UI.cursorEdge = Drawing.new("Triangle")
+    UI.cursorEdge.Filled = false
+    UI.cursorEdge.Thickness = 2
+    UI.cursorEdge.Color = Color3.fromRGB(10, 10, 10)
+    UI.cursorEdge.ZIndex = 10001
+  end
+  local mouse = LocalPlayer:GetMouse()
+  local a = Vector2.new(mouse.X, mouse.Y)
+  local b = Vector2.new(mouse.X + 5, mouse.Y + 18)
+  local c = Vector2.new(mouse.X + 14, mouse.Y + 12)
+  for _, cursor in ipairs({ UI.cursorFill, UI.cursorEdge }) do
+    cursor.PointA, cursor.PointB, cursor.PointC = a, b, c
+    cursor.Visible = true
+  end
+end
 
 local function findUE()
   local envs = {}
@@ -3795,6 +3835,7 @@ local function Unload()
   if _G.AotrRunId == RunId then _G.AotrStop = true end
   CurrentTitanTarget = nil
   UI.unloading = true
+  UI.RemoveCursor()
   Heartbeat("unloaded")
   if UI.lib and not UI.lib._unloaded and type(UI.lib.Unload) == "function" then pcall(function() UI.lib:Unload() end) end
 end
@@ -3848,6 +3889,8 @@ local function buildMenu()
   reg("Autofarm", farm:AddToggle("Autofarm", { Text = "Auto Farm Titans (F6)", Default = UserConfigs.Autofarm,
     Tooltip = "Hover above the nearest titan, pull its nape to you and slash",
     Callback = setter("Autofarm") }))
+  reg("RandomMouseMovements", farm:AddToggle("RandomMouseMovements", { Text = "Random Mouse Movements", Default = UserConfigs.RandomMouseMovements,
+    Tooltip = "Optional mouse sweeps during combat; paused while settings are open", Callback = setter("RandomMouseMovements") }))
   reg("AutoRetry", farm:AddToggle("AutoRetry", { Text = "Auto Retry", Default = UserConfigs.AutoRetry,
     Tooltip = "Press Retry on the rewards screen to start the next mission",
     Callback = setter("AutoRetry") }))
@@ -4056,6 +4099,7 @@ local lastBeat, lastStatusTick = 0, 0
 local lastBox, boxWrites = 0, 0
 local LastStatusText = nil
 StatusTick = function()
+  UI.UpdateCursor()
   if os.clock() - lastStatusTick < 0.1 then return end
   lastStatusTick = os.clock()
   TraceStatus()
@@ -4097,6 +4141,7 @@ StatusTick = function()
   end
 end
 StatusCleanup = function()
+  UI.RemoveCursor()
   if StatusLabel then pcall(function() StatusLabel:Remove() end); StatusLabel = nil end
 end
 
