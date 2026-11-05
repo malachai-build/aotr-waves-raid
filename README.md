@@ -12,6 +12,8 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-w
 
 The entrypoint skips the normal mission and lobby, creates the Matcha `aotr` workspace folder, downloads the pinned source, and spawns it immediately. It has no top-level wait; Matcha needs the source spawned before the autoexec caller yields.
 
+Keep only one active AoTR autoexec entrypoint for Waves and Raids. In particular, replace an existing full `autofarmraids.lua` autoexec copy with this line instead of adding it alongside that copy.
+
 This source includes Waves crate delivery, Market and upgrade stations, perk management, raid chests, QTE handling, and raid boss targeting. It is the same code currently staged at `C:\matcha\workspace\aotr\autofarm_branch.lua` and `C:\matcha\autoexec\autofarmraids.lua` (verified by SHA-256 on 2026-11-05).
 
 The normal mission source is maintained separately in [aotr-farm](https://github.com/malachai-build/aotr-farm). The older combined repository history was preserved before the split.
