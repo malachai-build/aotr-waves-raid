@@ -297,6 +297,7 @@ if identifyexecutor and identifyexecutor() ~= "Matcha" then Boot("exit: executor
 repeat task.wait(0.25) until game.GameId ~= 0 and game.PlaceId ~= 0
 if game.GameId ~= 4658598196 then Boot("exit: wrong game " .. tostring(game.GameId)); DebugPrint("debug", nil, nil, nil, "Wrong game detected..?"); return end
 if game.PlaceId == 14916516914 then Boot("exit: lobby"); Heartbeat("lobby"); DebugPrint("debug", nil, nil, nil, "You seem to be in the lobby. Please execute this in a game."); return end
+if game.PlaceId == 14638336319 then Boot("exit: normal mission"); Heartbeat("unloaded"); return end
 Boot("game ok")
 
 local function WaitForService(serviceName: string)
