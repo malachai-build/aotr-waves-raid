@@ -33,3 +33,13 @@ Compile in Matcha, then run `tests/colossal_controller_test.lua` with the source
 Cannon calibration telemetry is written as JSON lines in `C:\matcha\workspace\aotr\cannon_calibration.txt` (Matcha disallows `.jsonl`). Shot records, actual projectile trajectories, impact times, and boss HP changes are recorded separately. `tools/analyze_cannon_calibration.py <log>` reports HP-confirmed hits, misses, rejected fire inputs, and unresolved shots; background 82,500-point ticks do not count as cannon hits.
 
 Final aim validation: 8/8 HP-confirmed shells in the retained validation cohort, including a complete final pass with 5/5 damaging shots. See [`calibration/cannon_validation.csv`](calibration/cannon_validation.csv) and [`calibration/README.md`](calibration/README.md) for distances, damage, and measurement rules.
+
+## Grab and ragdoll recovery
+
+**Auto QTE / Grab Escape** uses the displayed prompt key for timed QTEs and button-only escape prompts. It releases held keys if disabled and sends no new escape input while Roblox is unfocused. The saved AutoQTE preference is preserved; enable the toggle to use automatic escape.
+
+Character checks run at startup, after HP loss, and during combat. Ragdoll detection reads the actual native Humanoid state using the current client offsets; a persistent character Ragdoll attribute alone never blocks combat. A ragdoll, missing human body parts, or active escape prompt pauses targeting and hover. Damage clears cached character parts. After the game restores an intact character and clears the ragdoll, combat resumes after a short stability check. The script does not force game-owned ragdoll attributes or recreate destroyed body parts.
+
+The farm writes a single `recovering` heartbeat per interrupted episode. The updated watchdog allows 20 seconds for native recovery, then uses its existing Matcha-restart/Retry sequence. Manual Unload still disables recovery. A new server/respawn may still be required if the game's character controller cannot recover.
+
+Regression fixtures: `tests/character_recovery_test.lua` (both sources staged at `aotr/recovery_tests/normal.lua` and `raid.lua`).
