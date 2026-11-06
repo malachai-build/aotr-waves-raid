@@ -340,12 +340,12 @@ local TitanWaitStart, LastLoadBeat = os.clock(), 0
 repeat
   task.wait(0.03)
   if os.clock() - LastLoadBeat >= 1 then LastLoadBeat = os.clock(); Heartbeat("loading") end
-until TitansFolder:FindFirstChildOfClass("Model") or os.clock() - TitanWaitStart > 20
+until TitansFolder:FindFirstChildOfClass("Model") or os.clock() - TitanWaitStart > 2
 
 if TitansFolder:FindFirstChildOfClass("Model") then
   Boot(string.format("world ready after %.1fs", os.clock() - ScriptStart))
 else
-  Boot("no titans after 20s, starting anyway")
+  Boot("no titans after 2s, starting UI and retry monitor")
 end
 DebugPrint("debug", nil, nil, nil, "Sucesfully loaded all services and titans folder / interface.")
 
@@ -556,7 +556,7 @@ local StatusCleanup = function() end
 -- load behind Matcha hanging. Counted here and shown per second in the black box (writes=).
 local HeavyWrites = 0
 
-local Supplies = { HudAt = -math.huge, NextRefillAt = 0, NextReloadAt = 0, Active = nil, KeyDown = false }
+local Supplies = { HudAt = -math.huge, NextReloadAt = 0, Active = nil, KeyDown = false }
 -- End supply state.
 
 local CurrentRobloxState = "Active"
@@ -1237,10 +1237,18 @@ local function AreBladesFullyBroken(): boolean
   return value ~= nil and value >= -0.1501 and value <= 0
 end
 
+-- Once all blades are gone, only a full spare-set refill releases combat.
+function Supplies.CombatLocked()
+  local hud = Supplies.ReadHud()
+  if hud.Sets == 0 and AreBladesFullyBroken() then Supplies.EmptyLocked = true end
+  if Supplies.EmptyLocked and hud.Sets == 3 then Supplies.EmptyLocked = false end
+  return Supplies.EmptyLocked == true
+end
+
 local function DoINeedToRefill(): (boolean, string?)
   local hud = Supplies.ReadHud()
   local now = os.clock()
-  if hud.Sets == 0 then return true, "spare sets 0" end
+  if Supplies.CombatLocked() then return true, "empty blades: combat locked until 3/3" end
   if hud.Gas == 0 then return true, "gas 0%" end
   if Supplies.SupplyUnknownSince and now - Supplies.SupplyUnknownSince >= 2 then
     return true, "supply HUD unreadable"
@@ -1258,10 +1266,7 @@ function Supplies.Action()
   local now = os.clock()
   if now < Supplies.ReadyAt or now < (Supplies.SettleUntil or 0) then return nil end
   local refill, reason = DoINeedToRefill()
-  if refill then
-    if now >= Supplies.NextRefillAt then return "refill", reason end
-    return nil -- Failed/unknown refill: let combat run until the 20-second retry.
-  end
+  if refill then return "refill", reason end
   if now >= Supplies.NextReloadAt and AreBladesFullyBroken() then return "reload", "empty blades" end
   return nil
 end
@@ -1329,8 +1334,27 @@ function Supplies.CanContinue()
 end
 
 function Supplies.HoldReload()
+  if Supplies.Active == "refill" and Supplies.RefillRoot then
+    if os.clock() - Supplies.HoverAt < 0.1 then return end
+    Supplies.HoverAt = os.clock()
+    local velocity = Supplies.RefillRoot.AssemblyLinearVelocity
+    if os.clock() < (Supplies.RefillBrakeUntil or 0) then
+      -- Brief arrival brake catches residual upward/downward momentum and bounce.
+      if velocity and velocity.Magnitude > 0.1 then
+        Supplies.RefillRoot.AssemblyLinearVelocity = Vector3Zero
+        HeavyWrites += 1
+      end
+      return
+    end
+    -- Brake sliding without cancelling gravity or moving the player off the floor.
+    if velocity and (math.abs(velocity.X) > 0.1 or math.abs(velocity.Z) > 0.1) then
+      Supplies.RefillRoot.AssemblyLinearVelocity = Vector3New(0, velocity.Y, 0)
+      HeavyWrites += 1
+    end
+    return
+  end
   if Supplies.Active ~= "reload" or not Supplies.ReloadRoot then return end
-  if os.clock() - Supplies.HoverAt < 0.5 then return end
+  if os.clock() - Supplies.HoverAt < 0.1 then return end
   Supplies.HoverAt = os.clock()
   Supplies.ReloadRoot.CFrame = SafePosNow()
   Supplies.ReloadRoot.AssemblyLinearVelocity = Vector3Zero
@@ -1350,7 +1374,68 @@ function Supplies.PressR()
   return Supplies.CanContinue()
 end
 
+-- Discover world trigger parts once, then read their current positions per refill.
+function Supplies.FindRefillStations()
+  if Supplies.Stations and os.clock() - Supplies.StationsAt < 30 then return Supplies.Stations end
+  local stations, seen = {}, {}
+  for index, part in ipairs(Workspace:GetDescendants()) do
+    if index % 1000 == 0 then task.wait() end
+    if part.Name == "Refill" and (part.ClassName == "Part" or part.ClassName == "MeshPart" or part.ClassName == "UnionOperation") then
+      local parent = part.Parent
+      if parent and parent.Name == "GasTanks" and not seen[part.Address] then
+        seen[part.Address] = true
+        stations[#stations + 1] = part
+      end
+    end
+  end
+  Supplies.Stations, Supplies.StationsAt = stations, os.clock()
+  return stations
+end
+
+function Supplies.SelectRefillStation()
+  local stations = Supplies.FindRefillStations()
+  if #stations == 0 then return nil end
+  local threats = {}
+  for _, titan in pairs(KnownTitans) do
+    if IsTitanAlive(titan) then
+      local root = GetTitanHrp(titan)
+      if root then threats[#threats + 1] = root.Position end
+    end
+  end
+  local playerRoot = GetPlayerHrp(LocalPlayer)
+  local origin = playerRoot and playerRoot.Position
+  local best, bestPosition, bestCount, bestClearance, bestTravel
+  for _, part in ipairs(stations) do
+    if part.Parent then
+      local position = part.Position
+      if position and position.X == position.X and position.Y == position.Y and position.Z == position.Z then
+        local count, clearance = 0, math.huge
+        for _, threat in ipairs(threats) do
+          local distance = (threat - position).Magnitude
+          if distance < 180 then count += 1 end
+          clearance = math.min(clearance, distance)
+        end
+        local travel = origin and (origin - position).Magnitude or 0
+        if not best or count < bestCount
+          or (count == bestCount and clearance > bestClearance)
+          or (count == bestCount and clearance == bestClearance and travel < bestTravel) then
+          best, bestPosition, bestCount, bestClearance, bestTravel = part, position, count, clearance, travel
+        end
+      end
+    end
+  end
+  if best then
+    GasTankModel, GasTankPosition = best.Parent, bestPosition
+    Boot(string.format("refill station selected: %d candidates, %d titans within 180 studs, nearest=%.0f destination=%s",
+      #stations, bestCount, bestClearance, tostring(bestPosition)))
+  end
+  return bestPosition
+end
+
 function Supplies.TankPosition()
+  local selected = Supplies.SelectRefillStation()
+  if selected then return selected end
+  -- Keep the previous map-specific fallback for stations without a Refill trigger.
   if GasTankModel and not GasTankModel.Parent then GasTankModel, GasTankPosition = nil, nil end
   if GasTankPosition then return GasTankPosition end
   if not GasTankModel then HandleDifferentGasTankPaths() end
@@ -1377,6 +1462,21 @@ local function HandleAllReloads()
   local freshAction, freshReason = Supplies.Action()
   if freshAction ~= action then return false end
   reason = freshReason or reason
+  -- Finding a station can yield. Keep the combat safety hover running until the
+  -- destination exists instead of disabling it and falling during that lookup.
+  local refillPosition
+  if action == "refill" then
+    refillPosition = Supplies.TankPosition()
+    if not refillPosition or refillPosition.X ~= refillPosition.X or refillPosition.Y ~= refillPosition.Y
+      or refillPosition.Z ~= refillPosition.Z then
+      Boot("refill skipped: station position unavailable; refill remains pending")
+      return false
+    end
+    if not Supplies.CanContinue() then return false end
+    hrp = GetPlayerHrp(LocalPlayer)
+    if not IsValid(hrp) then return false end
+  end
+  local combatVelocity = hrp.AssemblyLinearVelocity
   Supplies.Active = action
   ReloadingBlades = action == "reload"
   WhatShouldIBeDoing = action
@@ -1385,21 +1485,63 @@ local function HandleAllReloads()
   FarmStats.Status = action == "reload" and "reloading" or "refilling"
   Boot(action .. " started: reason=" .. tostring(reason) .. " gradient=" .. tostring(before.Durability) .. " sets=" .. tostring(before.Sets) .. " gas=" .. tostring(before.Gas))
   local ok, success = pcall(function()
+    local nextRefillPress
     if action == "reload" then
       -- Only an actual reload moves to the reload hover. Combat stays paused until confirmed.
       Tr.step("reload", "tp to sky (write)")
       Supplies.ReloadRoot, Supplies.HoverAt = hrp, -math.huge
       Supplies.HoldReload()
     else
-      local position = Supplies.TankPosition()
-      if not position or not Supplies.CanContinue() then return false end
-      Tr.step("main", "refill: tp to gas tank (write)")
-      hrp.Position = position + Vector3New(5, 0, 0)
+      Supplies.RefillRoot, Supplies.HoverAt = hrp, -math.huge
+      -- Brake before relocating, then clear any motion recreated by the teleport.
       hrp.AssemblyLinearVelocity = Vector3Zero
+      HeavyWrites += 1
+      Boot("refill teleport 1: from=" .. tostring(hrp.Position) .. " destination=" .. tostring(refillPosition))
+      Tr.step("main", "refill: tp to gas tank (write)")
+      hrp.Position = refillPosition
+      hrp.AssemblyLinearVelocity = Vector3Zero
+      Supplies.RefillBrakeUntil = os.clock() + 0.15
       HeavyWrites += 2
-      task.wait(0.5)
+      local arriveBy = os.clock() + 0.5
+      repeat
+        if not Supplies.CanContinue() then return false end
+        Progress()
+        Supplies.HoldReload()
+        task.wait(0.05)
+      until os.clock() >= arriveBy
+      Boot("refill teleport 1 settled: position=" .. tostring(hrp.Position) .. " velocity=" .. tostring(hrp.AssemblyLinearVelocity))
+      -- Re-center after the drop, preserving the height reached naturally instead
+      -- of lifting the character back into a hover above the station.
+      if not Supplies.CanContinue() then return false end
+      -- Titans move while we land. Re-evaluate before committing to the station.
+      refillPosition = Supplies.TankPosition() or refillPosition
+      hrp.AssemblyLinearVelocity = Vector3Zero
+      local landed = hrp.Position
+      local nearStation = (landed - refillPosition).Magnitude <= 15
+        and math.abs(landed.Y - refillPosition.Y) <= 6
+      local secondPosition = nearStation and Vector3New(refillPosition.X, landed.Y, refillPosition.Z) or refillPosition
+      Tr.step("main", "refill: second tp after drop (write)")
+      hrp.Position = secondPosition
+      hrp.AssemblyLinearVelocity = Vector3Zero
+      Supplies.RefillBrakeUntil = os.clock() + 0.15
+      Supplies.HoverAt = -math.huge
+      HeavyWrites += 3
+      arriveBy = os.clock() + 0.5
+      repeat
+        if not Supplies.CanContinue() then return false end
+        Progress()
+        Supplies.HoldReload()
+        task.wait(0.05)
+      until os.clock() >= arriveBy
+      local arrived = hrp.Position
+      Boot("refill teleport 2 settled: position=" .. tostring(arrived) .. " destination=" .. tostring(secondPosition))
+      if (arrived - refillPosition).Magnitude > 15 then
+        Boot("refill aborted: teleport did not reach station")
+        return false
+      end
     end
     if not Supplies.PressR() then return false end
+    nextRefillPress = os.clock() + 1
     local deadline = os.clock() + (action == "reload" and 4 or 6)
     repeat
       Progress()
@@ -1409,8 +1551,18 @@ local function HandleAllReloads()
       if action == "reload" then
         -- The HUD tweens back to full; do not resume swings partway through that animation.
         if hud.Durability and hud.Durability >= 0.99 then return true end
-      elseif hud.Sets and hud.Sets > 0 and hud.Gas and hud.Gas > 0 then
-        if before.Sets == nil or before.Gas == nil or hud.Sets > before.Sets or hud.Gas > before.Gas then return true end
+      elseif hud.Sets == 3 and hud.Gas and hud.Gas > 0 then
+        return true -- Partial spare sets or gas alone do not confirm a blade refill.
+      end
+      if action == "refill" and os.clock() >= nextRefillPress
+        and os.clock() >= (Supplies.SettleUntil or 0) then
+        -- ReadHud tracks rising durability gradients. Let a blade reload finish
+        -- before pressing R again; continue refilling until the counter is 3/3.
+        -- Entry into the station can lag behind the teleport. Retry input instead of
+        -- spending the entire deadline watching a missed first press. Leave a player
+        -- who stayed in place alone so movement cannot restart the refill animation.
+        if not Supplies.PressR() then return false end
+        nextRefillPress = os.clock() + 1
       end
       task.wait(0.1)
     until os.clock() >= deadline
@@ -1418,17 +1570,27 @@ local function HandleAllReloads()
   end)
   if Supplies.KeyDown then pcall(keyrelease, 0x52); Supplies.KeyDown = false end
   Supplies.Active, Supplies.ReloadRoot = nil, nil
+  Supplies.RefillRoot = nil
+  Supplies.RefillBrakeUntil = nil
   ReloadingBlades = false
   WhatShouldIBeDoing = "attack"
-  FarmStats.Status = "attacking"
-  if action == "refill" then
-    -- Failure (including missing HUD/tank) never traps the farm in a refill loop.
-    Supplies.NextRefillAt = os.clock() + 20
-  else
+  FarmStats.Status = Supplies.CombatLocked() and "waiting for refill" or "attacking"
+  -- Supply holds brake the character. Preserve combat momentum when the game's
+  -- movement controller still holds it at zero afterward; damage depends on speed.
+  if combatVelocity and combatVelocity.Magnitude > 10 and combatVelocity.Magnitude < 5000
+    and not Supplies.CombatLocked() and UserConfigs.Autofarm and Supplies.CanContinue() and IsLocalAlive()
+    and IsValid(hrp) then
+    local velocity = hrp.AssemblyLinearVelocity
+    if velocity and velocity.Magnitude < 1 then
+      hrp.AssemblyLinearVelocity = combatVelocity
+      HeavyWrites += 1
+    end
+  end
+  if action == "reload" then
     Supplies.SettleUntil = os.clock() + 1
     Supplies.NextReloadAt = os.clock() + (ok and success and 0.25 or 3)
   end
-  Boot(action .. (ok and success and " confirmed" or " failed; resuming farming") .. (not ok and (": " .. tostring(success)) or ""))
+  Boot(action .. (ok and success and " confirmed" or (Supplies.CombatLocked() and " failed; combat locked, refill pending" or " failed; resuming farming")) .. (not ok and (": " .. tostring(success)) or ""))
   return true
 end
 
@@ -1484,14 +1646,14 @@ local function IsRetryVisible(): boolean
     return IsObjectVisible(UiCache.RewardsFrame)
   end
 
-  RewardsFrame = GetPath(PlayerGui, true, "Interface", "Rewards") :: GuiObject; if not RewardsFrame then return false end
+  -- This is also called from RenderStepped, where GetPath cannot yield.
+  local interface = PlayerGui:FindFirstChild("Interface")
+  RewardsFrame = interface and interface:FindFirstChild("Rewards"); if not RewardsFrame then return false end
 
   UiCache.RewardsFrame = RewardsFrame
   return IsObjectVisible(RewardsFrame)
 end
 
-
-local RetryCount = 0
 
 -- Matcha returns AbsoluteSize=(0,0) and no Size for this game's GUI buttons. Use the live
 -- AbsolutePosition plus the measured 2560x1440 offset, scaled uniformly by viewport height.
@@ -1510,35 +1672,31 @@ function Stats.GuiClickPoint(Button: Instance, fallbackX: number, fallbackY: num
   return math.floor(math.clamp(x, 1, Viewport.X - 1)), math.floor(math.clamp(y, 1, Viewport.Y - 1))
 end
 
+local RetryCount = 0
+
 local function PressRetry(): boolean
-  if not IsRetryVisible() or not isrbxactive() then return false end
-  local button = GetPath(PlayerGui, false, "Interface", "Rewards", "Main", "Info", "Main", "Buttons", "Retry") :: GuiObject?
-  if not button then return false end
-  local title = button:FindFirstChild("Title") :: TextLabel?
+  if not IsRetryVisible() or not isrbxactive() or Stopped() then return false end
+  local button = GetPath(PlayerGui, false, "Interface", "Rewards", "Main", "Info", "Main", "Buttons", "Retry")
+  local title = button and button:FindFirstChild("Title")
   if title and string.find(string.upper(title.Text), "STARTING", 1, true) then return true end
-  -- Verified live click: (1475,1136) at 2560x1440. Retry.AbsolutePosition is
-  -- (1428,1103), while Matcha reports zero AbsoluteSize for this button.
-  local x, y = Stats.GuiClickPoint(button, 0.018, 0.0231)
-  if not x then return false end
-  local targetX, targetY = x + math.random(-2, 2), y + math.random(-2, 2)
-  mousemoveabs(targetX, targetY)
-  mousemoverel(1, 0)
-  local mouse = LocalPlayer:GetMouse()
-  local moveDeadline = os.clock() + 1.5
-  while os.clock() < moveDeadline and (math.abs(mouse.X - targetX) > 6 or math.abs(mouse.Y - targetY) > 6) do
-    task.wait(0.05)
+  -- Primary retry path requested by the user: UI navigation, then D, D, Enter.
+  -- Guard each step so a focus change cannot send the rest into another app.
+  local function tap(vk, held, after)
+    if Stopped() or not isrbxactive() or not IsRetryVisible() then return false end
+    keypress(vk)
+    task.wait(held)
+    pcall(keyrelease, vk)
+    if Stopped() or not isrbxactive() then return false end
+    task.wait(after)
+    return not Stopped() and isrbxactive() and IsRetryVisible()
   end
-  if math.abs(mouse.X - targetX) > 6 or math.abs(mouse.Y - targetY) > 6 then
-    Boot(string.format("retry pointer missed target (%d,%d -> %d,%d)", targetX, targetY, mouse.X, mouse.Y))
-    return false
-  end
-  task.wait(math.random(10, 20) / 100)
-  mouse1click()
   RetryCount += 1
-  task.wait(math.random(25, 40) / 100)
-  local started = title and string.find(string.upper(title.Text), "STARTING", 1, true) ~= nil
-  Boot(string.format("retry click %d (%s)", RetryCount, started and "starting" or "awaiting response"))
-  return started or false
+  Boot(string.format("retry navigation %d: backslash D D Enter", RetryCount))
+  if not tap(0xDC, 0.3, 1.0) then return false end
+  if not tap(0x44, 0.2, 0.4) then return false end
+  if not tap(0x44, 0.2, 0.4) then return false end
+  if not tap(0x0D, 0.3, 0.6) then return false end
+  return title and string.find(string.upper(title.Text), "STARTING", 1, true) ~= nil or false
 end
 
 --#endregion -- Ui elements functions --
@@ -1835,6 +1993,15 @@ function Recovery.Tick()
   if now - Recovery.CheckedAt < 0.2 then return end
   Recovery.CheckedAt = now
   if not UserConfigs.Autofarm then Recovery.Blocked = false; Recovery.Since = nil; return end
+  -- Rewards intentionally has no playable character. Let Retry own this state,
+  -- rather than publishing a recovery marker that restarts Matcha mid-click.
+  if UserConfigs.AutoRetry and IsRetryVisible() then
+    Recovery.Blocked, Recovery.Since, Recovery.Reason, Recovery.StableAt = false, nil, nil, nil
+    CurrentTitanTarget = nil
+    FarmStats.Target, FarmStats.Status = "none", "pressing retry"
+    Progress() -- still honors the bounded retry-stuck watchdog deadline
+    return
+  end
   local character = LocalPlayer.Character
   local address = character and character.Address
   local humanoid = character and GetHumanoid(character)
@@ -3515,7 +3682,7 @@ local function KillTitan(titan: Instance)
         break
       end
     end
-    if UserConfigs.AutoReload and Supplies.Action() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
+    if Supplies.CombatLocked() or (UserConfigs.AutoReload and Supplies.Action()) then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
     -- No per-titan kill timeout (removed at the user's request, 2026-11-03): the farm stays on a
     -- target until it dies. KillTimeout is no longer read. A titan that never
     -- dies is still caught by NoKillMinutes in the main loop, which resets the run.
@@ -3567,6 +3734,7 @@ local function KillTitan(titan: Instance)
       Tr.step("main", "click")
       if not IsLocalAlive() then CurrentTitanTarget = nil; break end
       if UI.IsInteracting() then continue end
+      if Supplies.CombatLocked() then continue end
       mouse1click()
       if UserConfigs.RandomMouseMovements and not UI.IsOpen() and os.clock() >= FarmStats.NextMouseSweepAt then
         local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
@@ -3690,7 +3858,7 @@ task.spawn(function() -- The main loop, where the magic happens
     -- A stuck mission keeps a fresh heartbeat (5 hours on 2026-11-02), so after NoKillMinutes
     -- without a kill the character feeds itself to a titan and the run resets. A raid boss takes
     -- minutes to kill, so while one is alive the limit is BossNoKillMinutes.
-    local Idle = Recovery.Blocked or not UserConfigs.Autofarm or FarmStats.Status == "paused" or FarmStats.Status == "pressing retry" or FarmStats.Status == "dead, waiting to respawn"
+    local Idle = Recovery.Blocked or Supplies.CombatLocked() or not UserConfigs.Autofarm or FarmStats.Status == "paused" or FarmStats.Status == "pressing retry" or FarmStats.Status == "dead, waiting to respawn"
     if FarmStats.Kills ~= LastKills or Idle then
       LastKills, LastKillAt = FarmStats.Kills, os.clock()
     else
@@ -3714,7 +3882,7 @@ task.spawn(function() -- The main loop, where the magic happens
     if UserConfigs.AutoRetry and IsRetryVisible() then
       Tr.step("main", "pressing retry")
       if FarmStats.Status ~= "pressing retry" then DumpHistory(string.format("retry screen at %d kills", FarmStats.Kills)) end
-      RetryScreenSince = RetryScreenSince or os.clock()
+      RetryScreenSince = isrbxactive() and (RetryScreenSince or os.clock()) or nil
       FarmStats.Status = "pressing retry"
       DebugPrint("debug", nil, nil, nil, "Detected that the retry button is visible.")
       local retryStarting = PressRetry()
@@ -3795,6 +3963,15 @@ task.spawn(function() -- The main loop, where the magic happens
 
     Tr.step("main", "blade check")
     if UserConfigs.AutoReload and HandleAllReloads() then
+      continue
+    end
+
+    if Supplies.CombatLocked() then
+      CurrentTitanTarget = nil
+      FarmStats.Target, FarmStats.Status = "none", "waiting for refill"
+      -- Keep WhatShouldIBeDoing="attack" so the existing no-target safety hover
+      -- stays active. Recovery/QTE and the next refill attempt still run above.
+      task.wait(0.2)
       continue
     end
 
