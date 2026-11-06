@@ -10,9 +10,9 @@ Save this single line as `C:\matcha\autoexec\aotr_waves_raid.lua`:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-waves-raid/refs/heads/main/autoexec.lua"))()
 ```
 
-The entrypoint skips the normal mission and lobby, creates the Matcha `aotr` workspace folder, downloads the pinned source, and spawns it immediately. It has no top-level wait; Matcha needs the source spawned before the autoexec caller yields.
+The entrypoint supports every AoTR mission map, checks the game ID, skips the main menu, lobby and trade hub, creates the Matcha `aotr` workspace folder, downloads the pinned source, and spawns it immediately. It has no top-level wait; Matcha needs the source spawned before the autoexec caller yields. Maps do not choose the script's feature set, and new mission maps need no loader update.
 
-Keep only one active AoTR autoexec entrypoint for Waves and Raids. In particular, replace an existing full `autofarmraids.lua` autoexec copy with this line instead of adding it alongside that copy.
+Keep only one active AoTR autoexec entrypoint: choose this version for its additional features or the normal farm for its simpler, more stable titan-killing feature set. Do not enable both loadstrings together. Replace an existing full `autofarmraids.lua` autoexec copy with this line instead of adding it alongside that copy.
 
 This source includes Waves crate delivery, Market and upgrade stations, perk management, raid chests, QTE handling, and raid boss targeting. The farm creates its `aotr` folder through Matcha's file API before writing logs or heartbeat files, including direct mission startup.
 

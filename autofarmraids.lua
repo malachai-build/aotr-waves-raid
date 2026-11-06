@@ -311,7 +311,7 @@ if identifyexecutor and identifyexecutor() ~= "Matcha" then Boot("exit: executor
 -- Auto-exec can fire before the DataModel has its ids; wait so the game check below is real.
 repeat task.wait(0.25) until game.GameId ~= 0 and game.PlaceId ~= 0
 if game.GameId ~= 4658598196 then Boot("exit: wrong game " .. tostring(game.GameId)); DebugPrint("debug", nil, nil, nil, "Wrong game detected..?"); return end
-if game.PlaceId == 14638336319 then Boot("exit: normal mission"); Heartbeat("unloaded"); return end
+-- Maps can host multiple modes; Forest is not inherently a normal-only place.
 Boot("game ok")
 
 local function WaitForService(serviceName: string)
