@@ -147,6 +147,7 @@ local UserConfigs = {
   SafeHeight = 9999,      -- Y of the reload spot
   ColossalDangerRadius = 180, -- interrupt cannon work for titans this close to Eren
   HumanSkills = true,     -- use ready human hotbar skills with a short gap between successes
+  AwakeningEnabled = false, -- opt in to the selected human awakening skill
   AwakeningSlot = 1,     -- Rage Mode / other awakening hotbar slot
   NoKillMinutes = 5,      -- minutes without a kill before feeding a titan to reset the run
   BossNoKillMinutes = 20, -- the same while a raid boss is alive (bosses never time out)
@@ -158,7 +159,7 @@ local SAVED_KEYS = {
   "Autofarm", "RandomMouseMovements", "AutoRetry", "AutoReload", "AutoSkipCutscenes", "AutoRaidChest", "OpenKeyChest", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
-  "HumanSkills", "AwakeningSlot", "ColossalDangerRadius",
+  "HumanSkills", "AwakeningEnabled", "AwakeningSlot", "ColossalDangerRadius",
   "NoKillMinutes", "BossNoKillMinutes", "AutoQTE",
 }
 
@@ -648,6 +649,7 @@ local function IsLocalAlive(): boolean
   if not Humanoid or not Humanoid.Parent or not Hrp or not Hrp.Parent then return false end
   return Humanoid.Health > 0
 end
+-- End local alive check.
 
 
 local function GetTitanHrp(titan: Instance): BasePart?
@@ -1592,6 +1594,10 @@ function Stats.UseHumanSkill(burst: boolean?): boolean
     end
   end
   local awakening = math.clamp(math.floor(UserConfigs.AwakeningSlot), 1, 5)
+  if not UserConfigs.AwakeningEnabled and state.Pending == awakening then
+    state.Pending = nil
+    state.NextSlot = awakening % 5 + 1
+  end
   local function slotUi(slot)
     local skill = state.Slots[slot]
     if not skill or not skill.Parent then
@@ -1638,7 +1644,7 @@ function Stats.UseHumanSkill(burst: boolean?): boolean
   if now - state.LastSuccess < (burst and 0.15 or 2.5) then return false end
   for offset = 0, 4 do
     local slot = (state.NextSlot + offset - 1) % 5 + 1
-    local canAwaken = slot ~= awakening or (burst and (not bar or not max)) or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)
+    local canAwaken = slot ~= awakening or (UserConfigs.AwakeningEnabled and ((burst and (not bar or not max)) or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)))
     if canAwaken and now >= (state.RetryAfter[slot] or 0) then
       local seconds, vk, text, stable = slotUi(slot)
       if seconds and (seconds <= 1 or stable) and vk then
@@ -1748,6 +1754,7 @@ local function QteTick()
     return
   end
   if Qte.GrabTick(now) then
+    if not Qte.Active then Qte.Since, Qte.Trace = now, {} end
     Qte.Active = true
     Qte.LastScale, Qte.PromptKey, Qte.PressedAt = nil, nil, nil
     return
@@ -1883,6 +1890,9 @@ function Recovery.Tick()
       pcall(keypress, 0x20); Recovery.ReleaseAt = now + 0.05
     end
     Recovery.Blocked, Recovery.Since, Recovery.Reason = false, nil, nil
+    if type(FarmStats.Status) == "string" and string.match(FarmStats.Status, "^recovering:") then
+      FarmStats.Status = "resuming combat"
+    end
     LastProgress = now
     Heartbeat("farming")
   end
@@ -1921,6 +1931,7 @@ function Stats.Colossal.UseReadySkills()
   for slot = 1, 5 do
     if Stopped() or not IsLocalAlive() or not isrbxactive() or Qte.Active or Stats.CutsceneSkip.Visible then break end
     if now < (state.SkillTaps[slot] or 0) then continue end
+    if slot == awakening and not UserConfigs.AwakeningEnabled then continue end
     if slot == awakening and bar and max and max > 0
       and (bar < max - 0.5 or human.AwakeningActive) then continue end
     local skill = Stats.Colossal.Path(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
@@ -3548,6 +3559,7 @@ local function KillTitan(titan: Instance)
       Tr.step("main", "pull napes (write)")
       PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
 
+      Tr.step("main", "human skills")
       Stats.UseHumanSkill(Stats.Colossal.Active())
 
       Tr.step("main", "slash wait")
@@ -4171,6 +4183,9 @@ local function buildMenu()
   local skills = main:AddLeftGroupbox("Human Skills")
   reg("HumanSkills", skills:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
     Tooltip = "Colossal: use each ready skill immediately; other modes wait 2.5 seconds between confirmed uses", Callback = setter("HumanSkills") }))
+  reg("AwakeningEnabled", skills:AddToggle("AwakeningEnabled", { Text = "Use Awakening", Default = UserConfigs.AwakeningEnabled,
+    Tooltip = "Allow the selected awakening slot; when disabled, that slot is skipped while other human skills remain enabled",
+    Callback = setter("AwakeningEnabled") }))
   reg("AwakeningSlot", skills:AddSlider("AwakeningSlot", { Text = "Awakening Slot", Default = UserConfigs.AwakeningSlot,
     Min = 1, Max = 5, Rounding = 0, Tooltip = "Hotbar slot for Rage Mode; press only at full bar, then wait until the bar empties and fills again",
     Callback = setter("AwakeningSlot") }))

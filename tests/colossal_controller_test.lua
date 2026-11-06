@@ -54,6 +54,7 @@ local function KeyToVk(text) return tonumber(text) and 48 + tonumber(text) end
 local function IsObjectVisible(t) return t.Visible == true end
 UserConfigs.Autofarm = true
 UserConfigs.HumanSkills = true
+UserConfigs.AwakeningEnabled = true
 UserConfigs.AwakeningSlot = 1
 Stats.HumanSkills = { AwakeningActive = false }
 Stats.CutsceneSkip = { Visible = false }
@@ -140,6 +141,11 @@ for i=1,5 do slots["Skill_"..i]:FindFirstChild("Cooldown").Visible=true end
 slots.Skill_3:FindFirstChild("Cooldown").Visible=false
 Stats.Colossal.UseReadySkills()
 assert(#tapped==10 and tapped[10]==51,"skill fires immediately when cooldown ends without global gap")
+UserConfigs.AwakeningEnabled=false
+Stats.Colossal.SkillScanAt=-math.huge;Stats.Colossal.SkillTaps={};tapped={}
+for i=1,5 do slots["Skill_"..i]:FindFirstChild("Cooldown").Visible=false end
+assert(Stats.Colossal.UseReadySkills())
+assert(#tapped==4 and tapped[1]==50 and tapped[4]==53,"Colossal mode respects disabled awakening while using ordinary slots")
 print("PASS: immediate skills 1-5, independent debounces, active cooldown exclusion, prompt reuse")
 ]====]
 assert(loadstring(code, "colossal_cannon_fixtures"))()
