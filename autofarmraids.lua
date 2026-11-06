@@ -1366,7 +1366,7 @@ function Supplies.TankPosition()
 end
 
 local function HandleAllReloads()
-  if TitanForm or not Supplies.CanContinue() then return false end
+  if not Supplies.CanContinue() then return false end
   local action, reason = Supplies.Action()
   if not action then return false end
   local hrp = GetPlayerHrp(LocalPlayer)
@@ -1571,8 +1571,12 @@ Stats.HumanSkills = { LastSuccess = -math.huge, LastCheck = -math.huge, LastTap 
   NextSlot = 1, Pending = nil, PendingSince = 0, RetryAfter = {}, LastBar = nil,
   AwakeningActive = false, Slots = {}, Labels = {}, LabelSince = {} }
 function Stats.UseHumanSkill(burst: boolean?): boolean
-  if not UserConfigs.HumanSkills or not IsLocalAlive() then return false end
-  if burst then return Stats.Colossal.UseReadySkills() end
+  if not UserConfigs.HumanSkills or not UserConfigs.Autofarm or Stopped() or not IsLocalAlive()
+    or not isrbxactive() or Recovery.Blocked or Qte.Active or Supplies.Active
+    or WhatShouldIBeDoing ~= "attack" or UI.IsInteracting() then return false end
+  local character = LocalPlayer.Character
+  if character and character:GetAttribute("Shifter") ~= nil then return false end
+  if burst then return Stats.Colossal and Stats.Colossal.UseReadySkills() or false end
   local state = Stats.HumanSkills
   local now = os.clock()
   if now - state.LastCheck < 0.15 then return false end
