@@ -6,11 +6,11 @@ if game.PlaceId == 13379208636 or game.PlaceId == 14916516914 or game.PlaceId ==
   writefile("aotr/heartbeat.txt", "unloaded " .. os.date("%H:%M:%S"))
   return
 end
-if game.PlaceId == 14638336319 then return end
 if game.GameId ~= 0 and game.GameId ~= 4658598196 then return end
+-- Feature set is selected by the user's loadstring, not by the map.
 if not isfolder("aotr") then makefolder("aotr") end
 
-local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-waves-raid/d3360e96a78a276ca7bf985afb30cb48830dd25d/autofarmraids.lua")
+local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-waves-raid/852fd60bf69e0b2c6740169fc882ccf69dd87892/autofarmraids.lua")
 if type(source) ~= "string" or #source < 150000 then
   warn("[AoTR Waves/Raid] source download failed")
   return
