@@ -22,6 +22,12 @@ For automatic recovery, use the [two-file watchdog setup](https://github.com/mal
 
 Based on Kitty's AoTR script v1.0.7 (@roguekitty).
 
+## HUD reload test branch
+
+The local `codex/hud-blade-reload` branch uses the blade HUD fill gradient instead of blade transparency. It reloads at gradient X from -0.15 through 0 and waits for full durability before combat resumes. The no-target safety hover is preserved. Empty spare sets (`0/3`), empty gas, or unreadable HUD data request a bounded refill attempt; failed attempts resume farming and retry after 20 seconds.
+
+The gradient layout is verified for Roblox `version-f0ea5da9412f4e35`. Other client versions use the unreadable-HUD fallback until verified. Run `tests/hud_reload_test.lua` with both sources staged at `aotr/reload_tests/normal.lua` and `raid.lua`. HUD counters also support unnamed text labels and rich text. A two-second startup/unknown-data observation period and a one-second reload settling period prevent transition frames from starting a refill. Refill logs record the triggering reason, gas, spare sets, and gradient. Full live reload/refill cycles remain to be tested before release; public autoexec source pins are unchanged.
+
 ## Colossal raid (local development)
 
 The cannon/Eren-defense controller is active again; the colossal sword experiment has been removed. Sword attacks and nape pulls target normal titans, prioritizing attackers near Eren. The controller tracks cannon cooldown, prepares early for the next shot, and yields to imminent Eren danger. Aim uses the measured 500-stud/sec shell speed and 210-stud/sec-squared downward acceleration, selecting an intersecting arc through the titan body. It stays mounted through impact when Eren is safe. Full raid completion remains unverified.
