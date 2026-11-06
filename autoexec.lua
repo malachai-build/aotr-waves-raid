@@ -10,7 +10,7 @@ if game.GameId ~= 0 and game.GameId ~= 4658598196 then return end
 -- Feature set is selected by the user's loadstring, not by the map.
 if not isfolder("aotr") then makefolder("aotr") end
 
-local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-waves-raid/852fd60bf69e0b2c6740169fc882ccf69dd87892/autofarmraids.lua")
+local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-waves-raid/cfb53d7f74c03a3f71b8d1c8d42604374854eb5a/autofarmraids.lua")
 if type(source) ~= "string" or #source < 150000 then
   warn("[AoTR Waves/Raid] source download failed")
   return

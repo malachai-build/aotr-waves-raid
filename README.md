@@ -22,6 +22,16 @@ For automatic recovery, use the [two-file watchdog setup](https://github.com/mal
 
 Based on Kitty's AoTR script v1.0.7 (@roguekitty).
 
+## HUD reloads, human skills, and menu placement
+
+Blade reloads use the HUD fill gradient rather than blade transparency. Gradient X from -0.15 through 0 requests a reload; combat waits for full durability before resuming. The no-target safety hover is preserved. Empty spare sets (`0/3`), empty gas, or persistently unreadable HUD data request a bounded refill. Failed attempts resume farming and retry after 20 seconds. Counter readers accept unnamed labels and rich text, and startup/reload settling prevents transition frames from requesting a refill.
+
+The gradient layout is verified for Roblox `version-f0ea5da9412f4e35`; other versions use the unreadable-HUD fallback until verified. `tests/hud_reload_test.lua` covers both sources staged at `aotr/reload_tests/normal.lua` and `raid.lua`.
+
+Both farms use human skills after nape pulling and before slashing. Main / Human Skills includes **Use Awakening**, off by default, and the awakening slot selector. When disabled, the selected slot is skipped while other human skills remain enabled; turning it off also cancels pending awakening retries. The toggle is saved and applies to Colossal's immediate skill routine too. Automated titan transformation is disabled; the normal farm retains the former implementation and controls in comments.
+
+Menu placement waits for a valid camera viewport before centering and preserves subsequent dragging. Recovery completion clears its status label; the normal human-skill health helper is declared before its callers so combat can continue after recovery. Regression fixtures include `tests/human_skills_test.lua`, `tests/menu_centering_test.lua`, `tests/character_recovery_test.lua`, and `tests/grab_escape_test.lua`.
+
 ## Colossal raid (local development)
 
 The cannon/Eren-defense controller is active again; the colossal sword experiment has been removed. Sword attacks and nape pulls target normal titans, prioritizing attackers near Eren. The controller tracks cannon cooldown, prepares early for the next shot, and yields to imminent Eren danger. Aim uses the measured 500-stud/sec shell speed and 210-stud/sec-squared downward acceleration, selecting an intersecting arc through the titan body. It stays mounted through impact when Eren is safe. Full raid completion remains unverified.

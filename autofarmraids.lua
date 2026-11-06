@@ -20,6 +20,7 @@ end
 
 local Stats = {}
 local UI = { lib = nil, window = nil, controls = {}, unloading = false, ready = false }
+local Qte -- Forward declaration: supplies and combat share the QTE state initialized below.
 
 local ScriptStart = os.clock()
 
@@ -146,6 +147,7 @@ local UserConfigs = {
   SafeHeight = 9999,      -- Y of the reload spot
   ColossalDangerRadius = 180, -- interrupt cannon work for titans this close to Eren
   HumanSkills = true,     -- use ready human hotbar skills with a short gap between successes
+  AwakeningEnabled = false, -- opt in to the selected human awakening skill
   AwakeningSlot = 1,     -- Rage Mode / other awakening hotbar slot
   NoKillMinutes = 5,      -- minutes without a kill before feeding a titan to reset the run
   BossNoKillMinutes = 20, -- the same while a raid boss is alive (bosses never time out)
@@ -157,7 +159,7 @@ local SAVED_KEYS = {
   "Autofarm", "RandomMouseMovements", "AutoRetry", "AutoReload", "AutoSkipCutscenes", "AutoRaidChest", "OpenKeyChest", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
-  "HumanSkills", "AwakeningSlot", "ColossalDangerRadius",
+  "HumanSkills", "AwakeningEnabled", "AwakeningSlot", "ColossalDangerRadius",
   "NoKillMinutes", "BossNoKillMinutes", "AutoQTE",
 }
 
@@ -409,12 +411,7 @@ type UiCacheType = {
   RewardsFrame: GuiObject?
 }
 
-type BladeCacheType = {
-  RightBlade: Instance?,
-  LeftBlade: Instance?,
-  RightHand: Instance?,
-  LeftHand: Instance?
-}
+
 
 
 
@@ -422,7 +419,6 @@ local TitansCache: { [number]: TitanEntry } = {}
 local KnownTitans: { [number]: Instance } = {} -- Childrens of the titans folder
 local CharacterCache: { [number]: CharacterCacheType } = {}
 local UiCache: UiCacheType = {}
-local BladeCache: BladeCacheType = {}
 
 
 local GasTankModel: Instance? = nil
@@ -560,21 +556,16 @@ local StatusCleanup = function() end
 -- load behind Matcha hanging. Counted here and shown per second in the black box (writes=).
 local HeavyWrites = 0
 
-local CachedBladesBroken: boolean = false
-local LastBladeCheck: number = 0
+local Supplies = { HudAt = -math.huge, NextRefillAt = 0, NextReloadAt = 0, Active = nil, KeyDown = false }
+-- End supply state.
 
 local CurrentRobloxState = "Active"
 local WhatShouldIBeDoing = "attack"
 
 local ReloadingBlades: boolean = false
-local LastReloadingTime: number = 0
-
-local REFILL_STUCK_LIMIT = 20 -- seconds stuck refilling before letting a titan kill us
-local RefillStuckSince: number? = nil
-local RefillLastSeen: number = 0
 
 
-local DownMiddlePartUi: Instance? = GetPath(PlayerGui, true, "Interface", "HUD", "Main", "Top", "7"); if not DownMiddlePartUi then return end
+
 
 
 --== Offsets ==--
@@ -585,7 +576,6 @@ local BaseToPrimitiveOffset = Offsets.BasePart.Primitive;
 local PrimitivePositionOffset = Offsets.Primitive.Position;
 local VisibleOffset = Offsets.GuiObject.Visible;
 local SizeOffset = Offsets.GuiObject.Size; -- UDim2: X.Scale float, X.Offset int, Y.Scale, Y.Offset
-local TransparencyBasePartOffset = Offsets.BasePart.Transparency;
 local AbsolutPositionGuiElementOffset = Offsets.GuiBase2D.AbsoluteSize;
 
 
@@ -659,6 +649,7 @@ local function IsLocalAlive(): boolean
   if not Humanoid or not Humanoid.Parent or not Hrp or not Hrp.Parent then return false end
   return Humanoid.Health > 0
 end
+-- End local alive check.
 
 
 local function GetTitanHrp(titan: Instance): BasePart?
@@ -1163,101 +1154,118 @@ end
 
 --#region Gas tank functions --
 
-local function GetUiCached(cacheKey: string, parent: Instance, ...)
-  local cached = UiCache[cacheKey]; if cached then return cached end
-
-  local obj = GetPath(parent, false, ...); if not obj then return nil end
-
-  UiCache[cacheKey] = obj
-  return obj
+-- HUD supply state. One float read per 100 ms replaces the blade transparency scan.
+function Supplies.Counter(frame, name, kind)
+  if not frame then return nil end
+  local function parse(label)
+    if not label or type(label.Text) ~= "string" then return nil end
+    local text = string.gsub(label.Text, "<[^>]*>", "")
+    if kind == "sets" then
+      local count, maximum = string.match(text, "^%s*(%d+)%s*/%s*(%d+)%s*$")
+      count, maximum = tonumber(count), tonumber(maximum)
+      if count and maximum and maximum > 0 and count <= maximum then return count end
+    else
+      local count = tonumber(string.match(text, "^%s*(%d+%.?%d*)%s*%%%s*$"))
+      if count and count >= 0 and count <= 100 then return count end
+    end
+    return nil
+  end
+  local named = parse(frame:FindFirstChild(name))
+  if named ~= nil then return named end
+  -- HUD labels can be unnamed after respawn. Read the unique matching direct text child.
+  local value, matches = nil, 0
+  for _, child in ipairs(frame:GetChildren()) do
+    if child.ClassName == "TextLabel" then
+      local parsed = parse(child)
+      if parsed ~= nil then value, matches = parsed, matches + 1 end
+    end
+  end
+  if matches == 1 then return value end
+  return nil
 end
 
+function Supplies.ReadHud(force)
+  local now = os.clock()
+  if not force and Supplies.Hud and now - Supplies.HudAt < 0.1 then return Supplies.Hud end
+  local hud = { Unknown = true, SupplyUnknown = true, DurabilityUnknown = true }
+  local ok = pcall(function()
+    local root = LocalPlayer:FindFirstChild("PlayerGui")
+    for _, name in ipairs({"Interface", "HUD", "Main", "Top", "7"}) do
+      root = root and root:FindFirstChild(name)
+    end
+    if not root then return end
+    local blades = root:FindFirstChild("Blades")
+    hud.Sets = Supplies.Counter(blades, "Sets", "sets")
+    hud.Gas = Supplies.Counter(root:FindFirstChild("Gas"), "Percentage", "gas")
+    local inner = blades and blades:FindFirstChild("Inner")
+    local bar = inner and inner:FindFirstChild("Bar")
+    local gradient = bar and bar:FindFirstChild("Gradient")
+    -- Matcha does not bind UIGradient.Offset. This layout was measured against this client.
+    if not Supplies.VersionChecked then
+      local versionOk, version = pcall(getrbxversion)
+      Supplies.GradientOffset = versionOk and version == "version-f0ea5da9412f4e35" and 296 or nil
+      Supplies.VersionChecked = true
+    end
+    if gradient and gradient.ClassName == "UIGradient" and Supplies.GradientOffset then
+      local x = memory_read("float", gradient.Address + Supplies.GradientOffset)
+      if type(x) == "number" and x == x and x >= -0.1501 and x <= 1.001 then hud.Durability = x end
+    end
+    hud.SupplyUnknown = hud.Sets == nil or hud.Gas == nil
+    hud.DurabilityUnknown = hud.Durability == nil
+    hud.Unknown = hud.SupplyUnknown or hud.DurabilityUnknown
+  end)
+  if not ok then hud.Unknown, hud.SupplyUnknown, hud.DurabilityUnknown = true, true, true end
+  Supplies.ReadyAt = Supplies.ReadyAt or (now + 2)
+  if hud.SupplyUnknown then Supplies.SupplyUnknownSince = Supplies.SupplyUnknownSince or now
+  else Supplies.SupplyUnknownSince = nil end
+  if hud.DurabilityUnknown then Supplies.DurabilityUnknownSince = Supplies.DurabilityUnknownSince or now
+  else Supplies.DurabilityUnknownSince = nil end
+  -- A falling set count or rising bar is a reload transition, including a manual reload.
+  if (hud.Sets ~= nil and Supplies.LastSets ~= nil and hud.Sets < Supplies.LastSets)
+    or (hud.Durability ~= nil and Supplies.LastDurability ~= nil and hud.Durability > Supplies.LastDurability + 0.001) then
+    Supplies.SettleUntil = now + 1
+  end
+  if hud.Sets ~= nil then Supplies.LastSets = hud.Sets end
+  if hud.Durability ~= nil then Supplies.LastDurability = hud.Durability end
+  Supplies.Hud, Supplies.HudAt = hud, now
+  return hud
+end
 
 local function AreBladesFullyBroken(): boolean
-  if os.clock() - LastBladeCheck < 0.5 then return CachedBladesBroken end
-
-  LastBladeCheck = os.clock()
-
-  local RightBlade = BladeCache.RightBlade :: Instance
-  local LeftBlade = BladeCache.LeftBlade :: Instance
-
-  if not RightBlade or not RightBlade.Parent or not LeftBlade or not LeftBlade.Parent then
-    local LocalPlayerCharacterCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCharacterCache then return false end
-
-    local Character = LocalPlayerCharacterCache.Character or GetPlayerCharacter(LocalPlayer); if not Character then return false end
-    local Rig_ = Character:FindFirstChild("Rig_" .. LocalPlayer.Name); if not Rig_ then return false end
-
-    local RightHand = BladeCache.RightHand :: Instance
-    local LeftHand = BladeCache.LeftHand :: Instance
-
-    if not RightHand or not LeftHand then
-      RightHand = Rig_:FindFirstChild("RightHand")
-      LeftHand = Rig_:FindFirstChild("LeftHand")
-
-      if not RightHand or not LeftHand then return false end
-
-      BladeCache.RightHand = RightHand
-      BladeCache.LeftHand = LeftHand
-    end
-
-    RightBlade = RightHand:FindFirstChild("Blade_1")
-    LeftBlade = LeftHand:FindFirstChild("Blade_1")
-
-    if not RightBlade or not LeftBlade then return false end
-
-    BladeCache.RightBlade = RightBlade
-    BladeCache.LeftBlade = LeftBlade
-  end
-
-  local ok, AreBroken = pcall(function()
-    local RightTransparency = memory_read("float", RightBlade.Address :: number + TransparencyBasePartOffset)
-    local LeftTransparency = memory_read("float", LeftBlade.Address :: number + TransparencyBasePartOffset)
-
-    return RightTransparency >= 0.9 and LeftTransparency >= 0.9
-  end)
-
-  if not ok then
-    DebugPrint("warn", 0, nil, nil, "Memory read failed:", AreBroken)
-    return false
-  end
-
-  CachedBladesBroken = AreBroken
-  return AreBroken
+  local value = Supplies.ReadHud().Durability
+  -- -0.15 is represented slightly below -0.15 as a float; allow only rounding tolerance.
+  return value ~= nil and value >= -0.1501 and value <= 0
 end
 
-
-local function DoINeedToRefill(): boolean -- The 0 / 3 counter
-
-  local Blades = GetUiCached("Blades", DownMiddlePartUi, "Blades"); if not Blades then return true end
-  local TextForBlades = GetUiCached("TextForBlades", Blades, "Sets") :: TextLabel?; if not TextForBlades then return true end
-
-  local Gas = GetUiCached("Gas", DownMiddlePartUi, "Gas"); if not Gas then return true end
-  local TextForGas = GetUiCached("TextForGas", Gas, "Percentage") :: TextLabel?; if not TextForGas then return true end
-
-  local BladesValue = tonumber(TextForBlades.Text:match("%d+")) or 0
-  local GasValue = tonumber(TextForGas.Text:match("%d+")) or 0
-
-
-  local NeedRefill = BladesValue == 0 or GasValue == 0
-
-  if NeedRefill then
-    WhatShouldIBeDoing = "refill"
+local function DoINeedToRefill(): (boolean, string?)
+  local hud = Supplies.ReadHud()
+  local now = os.clock()
+  if hud.Sets == 0 then return true, "spare sets 0" end
+  if hud.Gas == 0 then return true, "gas 0%" end
+  if Supplies.SupplyUnknownSince and now - Supplies.SupplyUnknownSince >= 2 then
+    return true, "supply HUD unreadable"
   end
-
-  return NeedRefill
+  if Supplies.DurabilityUnknownSince and now - Supplies.DurabilityUnknownSince >= 2 then
+    return true, "durability HUD unreadable"
+  end
+  return false
 end
 
-
-local function IsReloadingBlades(): boolean  -- Basically, when reloading the 0 / 3 counter, the 'BV' is missing
-  local LocalPlayerCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCache then return false end
-
-  local Hrp = LocalPlayerCache.Hrp or GetPlayerHrp(LocalPlayer); if not Hrp then return false end
-  if Hrp:FindFirstChild("BV") then return false end
-
-
-  return true
+function Supplies.Action()
+  if Supplies.Active or WhatShouldIBeDoing ~= "attack" then return nil end
+  if not isrbxactive() or Recovery.Blocked or Qte.Active or UI.IsInteracting() then return nil end
+  Supplies.ReadHud()
+  local now = os.clock()
+  if now < Supplies.ReadyAt or now < (Supplies.SettleUntil or 0) then return nil end
+  local refill, reason = DoINeedToRefill()
+  if refill then
+    if now >= Supplies.NextRefillAt then return "refill", reason end
+    return nil -- Failed/unknown refill: let combat run until the 20-second retry.
+  end
+  if now >= Supplies.NextReloadAt and AreBladesFullyBroken() then return "reload", "empty blades" end
+  return nil
 end
-
+-- End supply HUD.
 
 -- Nearest live titan, skipped ones included (a titan the farm gave up on can still eat us).
 local function GetNearestTitanAny(): Instance?
@@ -1311,122 +1319,117 @@ local function GiveUpToTitan(reason: string?)
     task.wait(0.25)
   end
 
-  RefillStuckSince = nil
   WhatShouldIBeDoing = "attack"
 end
 
 
+function Supplies.CanContinue()
+  return not Stopped() and not Recovery.Blocked and UserConfigs.AutoReload
+    and isrbxactive() and not Qte.Active and not UI.IsInteracting()
+end
+
+function Supplies.HoldReload()
+  if Supplies.Active ~= "reload" or not Supplies.ReloadRoot then return end
+  if os.clock() - Supplies.HoverAt < 0.5 then return end
+  Supplies.HoverAt = os.clock()
+  Supplies.ReloadRoot.CFrame = SafePosNow()
+  Supplies.ReloadRoot.AssemblyLinearVelocity = Vector3Zero
+  HeavyWrites += 2
+end
+
+function Supplies.PressR()
+  if not Supplies.CanContinue() then return false end
+  keypress(0x52); Supplies.KeyDown = true
+  local untilAt = os.clock() + 0.5
+  repeat
+    Progress()
+    Supplies.HoldReload()
+    task.wait(0.05)
+  until os.clock() >= untilAt or not Supplies.CanContinue()
+  keyrelease(0x52); Supplies.KeyDown = false
+  return Supplies.CanContinue()
+end
+
+function Supplies.TankPosition()
+  if GasTankModel and not GasTankModel.Parent then GasTankModel, GasTankPosition = nil, nil end
+  if GasTankPosition then return GasTankPosition end
+  if not GasTankModel then HandleDifferentGasTankPaths() end
+  if not GasTankModel then return nil end
+  local part = GasTankModel:FindFirstChild("Refill") or GasTankModel:FindFirstChild("Primary") or GasTankModel.PrimaryPart
+  if part then GasTankPosition = part.Position; return GasTankPosition end
+  local address = memory_read("uintptr_t", GasTankModel.Address + PrimaryPartOffset)
+  if not address or address == 0 then return nil end
+  local primitive = memory_read("uintptr_t", address + BaseToPrimitiveOffset)
+  if not primitive or primitive == 0 then return nil end
+  GasTankPosition = Vector3New(memory_read("float", primitive + PrimitivePositionOffset),
+    memory_read("float", primitive + PrimitivePositionOffset + 4),
+    memory_read("float", primitive + PrimitivePositionOffset + 8))
+  return GasTankPosition
+end
+
 local function HandleAllReloads()
-  if Recovery.Blocked then return end
-  if not AreBladesFullyBroken() then return end
-
-  local LocalPlayerCharacterCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCharacterCache then return end
-  local Hrp = LocalPlayerCharacterCache.Hrp or GetPlayerHrp(LocalPlayer); if not Hrp then return end
-
-  local Time = os.clock()
-
-  if DoINeedToRefill() then
-    DebugPrint("debug", 0, nil, nil, "Detected that the local player needs refilling.")
-
-    -- The inner loop times out after 10s and gets re-entered, so track the stuck time across calls.
-    if not RefillStuckSince or os.clock() - RefillLastSeen > 5 then RefillStuckSince = os.clock() end
-
-    while true do
-      if Recovery.Blocked then return end
-      Progress()
-      RefillLastSeen = os.clock()
-      if not DoINeedToRefill() then RefillStuckSince = nil; WhatShouldIBeDoing = "attack"; break end
-      if os.clock() - RefillStuckSince > REFILL_STUCK_LIMIT then GiveUpToTitan(); return end
-      if IsReloadingBlades() then
-        task.wait(0.5)
-        continue
-      end
-
-      if os.clock() - Time > 10 then
-        DebugPrint("warn", 0, nil, nil, "Timeout happened while trying to refill?")
-        WhatShouldIBeDoing = "attack"
-        break
-      end
-
-      if GasTankPosition then
-        Hrp.AssemblyLinearVelocity = Vector3Zero
-        task.wait(0.24)
-
-        Tr.step("main", "refill: tp to gas tank (write)")
-        Hrp.Position = GasTankPosition + Vector3New(5, 0, 0)
-        Hrp.AssemblyLinearVelocity = Vector3Zero
-
-        task.wait(0.5)
-
-        keypress(0x52)
-        task.wait(0.5)
-        keyrelease(0x52)
-
-        task.wait(1)
-        continue
-      end
-
-
-      if not GasTankModel then HandleDifferentGasTankPaths() end -- the map may have loaded after startup
-      if not GasTankModel then WhatShouldIBeDoing = "attack"; return end
-      -- Docks' tank groups have a "Refill" trigger part whose Position Matcha reads natively
-      -- (13 studs wide, so the +5 X above still lands inside it).
-      local RefillPart = GasTankModel:FindFirstChild("Refill"); if RefillPart and RefillPart:IsA("BasePart") then GasTankPosition = RefillPart.Position; continue end
-      local PrimaryPart = GasTankModel.Primary; if PrimaryPart and PrimaryPart:IsA("BasePart") then GasTankPosition = PrimaryPart.Position; continue end
-
-      local PartAddress = memory_read("uintptr_t", GasTankModel.Address + PrimaryPartOffset )
-
-      if PartAddress == 0 then
-        DebugPrint("warn", 0, nil, nil, "No PrimaryPart for gas tank found!")
-        return
-      end
-
-      local Primitive = memory_read( "uintptr_t", PartAddress + BaseToPrimitiveOffset )
-
-      if Primitive == 0 then
-        DebugPrint("warn", 0, nil, nil, "No Primitive part found for 'PartAdress'!")
-        return
-      end
-
-      local x = memory_read("float", Primitive + PrimitivePositionOffset)
-      local y = memory_read("float", Primitive + PrimitivePositionOffset + 4)
-      local z = memory_read("float", Primitive + PrimitivePositionOffset + 8)
-
-      GasTankPosition = Vector3New(x, y, z)
-      DebugPrint("debug", 0, nil, nil, "Fetched gas tank position from memory: ", GasTankPosition)
-    end
-
-  else   -- Case 2: Only needs to reload blades
-    if ReloadingBlades then return end
-    if os.clock() - LastReloadingTime < 3 then return end
-
-    DebugPrint("debug", 0, nil, nil, "Detected that the local player needs reloading.")
-
-    ReloadingBlades = true
-    LastReloadingTime = os.clock()
-
-    task.spawn(function()
-      if not isrbxactive() then
-        DebugPrint("debug", 0, nil, nil, "Roblox is not active /:")
-        ReloadingBlades = false
-        return
-      end
-
-      DebugPrint("debug", 0, nil, nil, "Proceeding to reload blades.")
-
+  if not Supplies.CanContinue() then return false end
+  local action, reason = Supplies.Action()
+  if not action then return false end
+  local hrp = GetPlayerHrp(LocalPlayer)
+  if not IsValid(hrp) then return false end
+  local before = Supplies.ReadHud(true)
+  local freshAction, freshReason = Supplies.Action()
+  if freshAction ~= action then return false end
+  reason = freshReason or reason
+  Supplies.Active = action
+  ReloadingBlades = action == "reload"
+  WhatShouldIBeDoing = action
+  CurrentTitanTarget = nil
+  FarmStats.Target = "none"
+  FarmStats.Status = action == "reload" and "reloading" or "refilling"
+  Boot(action .. " started: reason=" .. tostring(reason) .. " gradient=" .. tostring(before.Durability) .. " sets=" .. tostring(before.Sets) .. " gas=" .. tostring(before.Gas))
+  local ok, success = pcall(function()
+    if action == "reload" then
+      -- Only an actual reload moves to the reload hover. Combat stays paused until confirmed.
       Tr.step("reload", "tp to sky (write)")
-      Hrp.CFrame = SafePosNow()
-
-      Tr.step("reload", "press R")
-      keypress(0x52)
+      Supplies.ReloadRoot, Supplies.HoverAt = hrp, -math.huge
+      Supplies.HoldReload()
+    else
+      local position = Supplies.TankPosition()
+      if not position or not Supplies.CanContinue() then return false end
+      Tr.step("main", "refill: tp to gas tank (write)")
+      hrp.Position = position + Vector3New(5, 0, 0)
+      hrp.AssemblyLinearVelocity = Vector3Zero
+      HeavyWrites += 2
       task.wait(0.5)
-      keyrelease(0x52)
-      task.wait(0.5)
-      Tr.step("reload", "done")
-
-      ReloadingBlades = false
-    end)
+    end
+    if not Supplies.PressR() then return false end
+    local deadline = os.clock() + (action == "reload" and 4 or 6)
+    repeat
+      Progress()
+      if not Supplies.CanContinue() then return false end
+      Supplies.HoldReload()
+      local hud = Supplies.ReadHud(true)
+      if action == "reload" then
+        -- The HUD tweens back to full; do not resume swings partway through that animation.
+        if hud.Durability and hud.Durability >= 0.99 then return true end
+      elseif hud.Sets and hud.Sets > 0 and hud.Gas and hud.Gas > 0 then
+        if before.Sets == nil or before.Gas == nil or hud.Sets > before.Sets or hud.Gas > before.Gas then return true end
+      end
+      task.wait(0.1)
+    until os.clock() >= deadline
+    return false
+  end)
+  if Supplies.KeyDown then pcall(keyrelease, 0x52); Supplies.KeyDown = false end
+  Supplies.Active, Supplies.ReloadRoot = nil, nil
+  ReloadingBlades = false
+  WhatShouldIBeDoing = "attack"
+  FarmStats.Status = "attacking"
+  if action == "refill" then
+    -- Failure (including missing HUD/tank) never traps the farm in a refill loop.
+    Supplies.NextRefillAt = os.clock() + 20
+  else
+    Supplies.SettleUntil = os.clock() + 1
+    Supplies.NextReloadAt = os.clock() + (ok and success and 0.25 or 3)
   end
+  Boot(action .. (ok and success and " confirmed" or " failed; resuming farming") .. (not ok and (": " .. tostring(success)) or ""))
+  return true
 end
 
 --#endregion Gas tank functions --
@@ -1570,8 +1573,12 @@ Stats.HumanSkills = { LastSuccess = -math.huge, LastCheck = -math.huge, LastTap 
   NextSlot = 1, Pending = nil, PendingSince = 0, RetryAfter = {}, LastBar = nil,
   AwakeningActive = false, Slots = {}, Labels = {}, LabelSince = {} }
 function Stats.UseHumanSkill(burst: boolean?): boolean
-  if not UserConfigs.HumanSkills or not IsLocalAlive() then return false end
-  if burst then return Stats.Colossal.UseReadySkills() end
+  if not UserConfigs.HumanSkills or not UserConfigs.Autofarm or Stopped() or not IsLocalAlive()
+    or not isrbxactive() or Recovery.Blocked or Qte.Active or Supplies.Active
+    or WhatShouldIBeDoing ~= "attack" or UI.IsInteracting() then return false end
+  local character = LocalPlayer.Character
+  if character and character:GetAttribute("Shifter") ~= nil then return false end
+  if burst then return Stats.Colossal and Stats.Colossal.UseReadySkills() or false end
   local state = Stats.HumanSkills
   local now = os.clock()
   if now - state.LastCheck < 0.15 then return false end
@@ -1587,6 +1594,10 @@ function Stats.UseHumanSkill(burst: boolean?): boolean
     end
   end
   local awakening = math.clamp(math.floor(UserConfigs.AwakeningSlot), 1, 5)
+  if not UserConfigs.AwakeningEnabled and state.Pending == awakening then
+    state.Pending = nil
+    state.NextSlot = awakening % 5 + 1
+  end
   local function slotUi(slot)
     local skill = state.Slots[slot]
     if not skill or not skill.Parent then
@@ -1633,7 +1644,7 @@ function Stats.UseHumanSkill(burst: boolean?): boolean
   if now - state.LastSuccess < (burst and 0.15 or 2.5) then return false end
   for offset = 0, 4 do
     local slot = (state.NextSlot + offset - 1) % 5 + 1
-    local canAwaken = slot ~= awakening or (burst and (not bar or not max)) or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)
+    local canAwaken = slot ~= awakening or (UserConfigs.AwakeningEnabled and ((burst and (not bar or not max)) or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)))
     if canAwaken and now >= (state.RetryAfter[slot] or 0) then
       local seconds, vk, text, stable = slotUi(slot)
       if seconds and (seconds <= 1 or stable) and vk then
@@ -1662,7 +1673,7 @@ end
 -- when it gets there. If it never moves, the key is pressed after Qte.STILL_PRESS seconds.
 -- Ticked from RenderStepped (no yields): memory reads only, and the key is released a tick later.
 -- The first QTEs are traced to boot.txt to tune this.
-local Qte = {
+Qte = {
   HIT_BAND = 0.06,    -- press when the Timing scale is within this of 1
   STILL_PRESS = 0.35, -- seconds of an unmoving Timing before pressing anyway
   Frame = nil, Timing = nil, Key = nil,
@@ -1743,6 +1754,7 @@ local function QteTick()
     return
   end
   if Qte.GrabTick(now) then
+    if not Qte.Active then Qte.Since, Qte.Trace = now, {} end
     Qte.Active = true
     Qte.LastScale, Qte.PromptKey, Qte.PressedAt = nil, nil, nil
     return
@@ -1878,6 +1890,9 @@ function Recovery.Tick()
       pcall(keypress, 0x20); Recovery.ReleaseAt = now + 0.05
     end
     Recovery.Blocked, Recovery.Since, Recovery.Reason = false, nil, nil
+    if type(FarmStats.Status) == "string" and string.match(FarmStats.Status, "^recovering:") then
+      FarmStats.Status = "resuming combat"
+    end
     LastProgress = now
     Heartbeat("farming")
   end
@@ -1916,6 +1931,7 @@ function Stats.Colossal.UseReadySkills()
   for slot = 1, 5 do
     if Stopped() or not IsLocalAlive() or not isrbxactive() or Qte.Active or Stats.CutsceneSkip.Visible then break end
     if now < (state.SkillTaps[slot] or 0) then continue end
+    if slot == awakening and not UserConfigs.AwakeningEnabled then continue end
     if slot == awakening and bar and max and max > 0
       and (bar < max - 0.5 or human.AwakeningActive) then continue end
     local skill = Stats.Colossal.Path(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
@@ -3499,7 +3515,7 @@ local function KillTitan(titan: Instance)
         break
       end
     end
-    if UserConfigs.AutoReload and AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
+    if UserConfigs.AutoReload and Supplies.Action() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
     -- No per-titan kill timeout (removed at the user's request, 2026-11-03): the farm stays on a
     -- target until it dies. KillTimeout is no longer read. A titan that never
     -- dies is still caught by NoKillMinutes in the main loop, which resets the run.
@@ -3543,6 +3559,7 @@ local function KillTitan(titan: Instance)
       Tr.step("main", "pull napes (write)")
       PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
 
+      Tr.step("main", "human skills")
       Stats.UseHumanSkill(Stats.Colossal.Active())
 
       Tr.step("main", "slash wait")
@@ -3777,12 +3794,7 @@ task.spawn(function() -- The main loop, where the magic happens
     end
 
     Tr.step("main", "blade check")
-    if UserConfigs.AutoReload and AreBladesFullyBroken() then
-      CurrentTitanTarget = nil
-      FarmStats.Status = "reloading"
-      Tr.step("main", "reload")
-      HandleAllReloads()
-      task.wait(1)
+    if UserConfigs.AutoReload and HandleAllReloads() then
       continue
     end
 
@@ -3942,6 +3954,30 @@ RenderConn = game:GetService("RunService").RenderStepped:Connect(OnRenderStepped
 local UE_URL = "https://raw.githubusercontent.com/hauntedscripts/Scripts2/refs/heads/main/matcha%20ue"
 local KEYS = { farm = 0x75, unload = 0x23 } -- F6, End
 
+-- Center once after the camera supplies real dimensions; never use a zero viewport.
+function UI.CenterWindow(win)
+  if not win or not win._aotrCenterPending then return false end
+  if win.Dragging then win._aotrCenterPending = false; return false end
+  local ok, viewport = pcall(function()
+    local camera = game:GetService("Workspace").CurrentCamera
+    return camera and camera.ViewportSize
+  end)
+  if not ok or not viewport or not win.Size then return false end
+  local x, y, width, height = viewport.X, viewport.Y, win.Size.X, win.Size.Y
+  if type(x) ~= "number" or type(y) ~= "number" or x ~= x or y ~= y
+    or x <= 0 or y <= 0 or x == math.huge or y == math.huge
+    or type(width) ~= "number" or type(height) ~= "number"
+    or width ~= width or height ~= height or width <= 0 or height <= 0
+    or width == math.huge or height == math.huge then return false end
+  -- Keep the title bar reachable even when the window is larger than the viewport.
+  win.Position = Vector2.new(math.max(math.min(8, x - 1), (x - width) / 2),
+    math.max(math.min(8, y - 1), (y - height) / 2))
+  win._visibilityDirty = true
+  win._aotrCenterPending = false
+  return true
+end
+-- End startup centering.
+
 -- Roblox can hide its native cursor in combat; draw a pointer above the settings UI.
 function UI.IsOpen()
   return not UI.unloading and UI.window and UI.window.Visible == true
@@ -4080,8 +4116,10 @@ local function buildMenu()
   ue.GradientBottomColor = Color3.fromRGB(14, 12, 8)
   ue.SettingsFile = "aotr_farm.ui.json"
   ue.ConfigFolder = "aotr_farm_configs"
-  local win = ue:CreateWindow({ Title = "Wings of Freedom  |  AoT: Revolution", Width = 540, Height = 580, AutoShow = true, Center = true })
+  local win = ue:CreateWindow({ Title = "Wings of Freedom  |  AoT: Revolution", Width = 540, Height = 580, AutoShow = true, Center = false, Position = Vector2.new(100, 100) })
   UI.window = win
+  win._aotrCenterPending = true
+  UI.CenterWindow(win)
   -- UE draws each control the moment it is added; build hidden, show once.
   pcall(function() win:Hide() end)
   local function reg(id, c) UI.controls[id] = c; return c end
@@ -4145,6 +4183,9 @@ local function buildMenu()
   local skills = main:AddLeftGroupbox("Human Skills")
   reg("HumanSkills", skills:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
     Tooltip = "Colossal: use each ready skill immediately; other modes wait 2.5 seconds between confirmed uses", Callback = setter("HumanSkills") }))
+  reg("AwakeningEnabled", skills:AddToggle("AwakeningEnabled", { Text = "Use Awakening", Default = UserConfigs.AwakeningEnabled,
+    Tooltip = "Allow the selected awakening slot; when disabled, that slot is skipped while other human skills remain enabled",
+    Callback = setter("AwakeningEnabled") }))
   reg("AwakeningSlot", skills:AddSlider("AwakeningSlot", { Text = "Awakening Slot", Default = UserConfigs.AwakeningSlot,
     Min = 1, Max = 5, Rounding = 0, Tooltip = "Hotbar slot for Rage Mode; press only at full bar, then wait until the bar empties and fills again",
     Callback = setter("AwakeningSlot") }))
@@ -4244,6 +4285,7 @@ local function buildMenu()
     pcall(function() ue:OnUnload(function() if not UI.unloading then Unload() end end) end)
   end
   pcall(function()
+    UI.CenterWindow(win)
     win:Show()
     win._visibilityDirty = true
   end)
@@ -4255,6 +4297,7 @@ local function buildMenu()
   -- Drive the window from our own thread instead.
   task.spawn(function()
     while not Stopped() and not UI.unloading and not ue._unloaded and not win.Destroyed do
+      if win._aotrCenterPending then UI.CenterWindow(win) end
       local ok, err = pcall(win.Step, win)
       if not ok then warn("[Aotr] menu step error: " .. tostring(err)); task.wait(0.25)
       else task.wait(ue.PerformanceMode and 0.05 or 0.016) end
